@@ -143,11 +143,8 @@ private:
                 if (__builtin_expect(msg_len < sizeof(ItchAddOrder), 0)) return;
                 stats.add_orders++;
                 if (book) {
-                    auto m = reinterpret_cast<const ItchAddOrder*>(msg_bytes);
-                    uint64_t oid = bswap64(m->order_reference_number);
-                    uint32_t shares = bswap32(m->shares);
-                    uint32_t px = bswap32(m->price);
-                    book->add_order(oid, m->buy_sell_indicator, shares, px);
+                    auto res = parse_add_order_simd(msg_bytes);
+                    book->add_order(res.order_id, res.side, res.shares, res.price);
                 }
                 break;
             }
