@@ -17,3 +17,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_executable(kestrel_bench
     src/main.cpp
 )
+
+add_executable(kestrel_bypass_test
+    src/test_bypass.cpp
+)
