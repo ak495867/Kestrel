@@ -46,6 +46,10 @@ public:
             } else if (k == DELETED_KEY) {
                 if (first_deleted == MAP_CAPACITY) first_deleted = idx;
             } else if (k == order_id) {
+                uint32_t old_raw = prices_[idx];
+                char old_side = (old_raw >> 31) ? 'B' : 'S';
+                uint32_t old_tick = (old_raw & 0x7FFFFFFF) / 100;
+                reduce_level(old_side, old_tick, shares_[idx]);
                 shares_[idx] = shares;
                 prices_[idx] = packed_price;
                 break;
@@ -58,7 +62,7 @@ public:
             if (side == 'B') {
                 bid_levels_[tick] += shares;
                 bid_bitmap_[tick >> 6] |= (1ULL << (tick & 63));
-                if (tick > best_bid_tick_) best_bid_tick_ = tick;
+                if (tick > best_bid_tick_ || best_bid_tick_ >= 500000) best_bid_tick_ = tick;
             } else {
                 ask_levels_[tick] += shares;
                 ask_bitmap_[tick >> 6] |= (1ULL << (tick & 63));
@@ -133,40 +137,43 @@ public:
 
     [[nodiscard]] size_t order_count() const noexcept { return active_orders_; }
 
+    [[nodiscard]] uint64_t level_volume(char side, uint32_t tick) const noexcept {
+        if (tick >= 500000) return 0;
+        return (side == 'B') ? bid_levels_[tick] : ask_levels_[tick];
+    }
+
     [[nodiscard]] uint32_t best_bid() noexcept {
-        if (best_bid_tick_ == 0 || bid_levels_[best_bid_tick_] > 0) return best_bid_tick_;
-        size_t bucket = best_bid_tick_ >> 6;
-        while (bucket < NUM_BUCKETS) {
+        if (best_bid_tick_ > 0 && best_bid_tick_ < 500000 && bid_levels_[best_bid_tick_] > 0) return best_bid_tick_;
+        size_t start_bucket = (NUM_BUCKETS - 1);
+        for (ssize_t bucket = static_cast<ssize_t>(start_bucket); bucket >= 0; --bucket) {
             uint64_t mask = bid_bitmap_[bucket];
-            if (bucket == (best_bid_tick_ >> 6)) {
-                mask &= ((1ULL << (best_bid_tick_ & 63)) - 1);
-            }
-            if (mask != 0) {
+            while (mask != 0) {
                 int bit = 63 - __builtin_clzll(mask);
-                best_bid_tick_ = static_cast<uint32_t>((bucket << 6) | bit);
-                return best_bid_tick_;
+                uint32_t cand = static_cast<uint32_t>((static_cast<size_t>(bucket) << 6) | bit);
+                if (cand < 500000 && bid_levels_[cand] > 0) {
+                    best_bid_tick_ = cand;
+                    return cand;
+                }
+                mask &= ~(1ULL << bit);
             }
-            if (bucket == 0) break;
-            --bucket;
         }
         best_bid_tick_ = 0;
         return 0;
     }
 
     [[nodiscard]] uint32_t best_ask() noexcept {
-        if (best_ask_tick_ == 0xFFFFFFFF || (best_ask_tick_ < 500000 && ask_levels_[best_ask_tick_] > 0)) return best_ask_tick_;
-        size_t bucket = (best_ask_tick_ < 500000) ? (best_ask_tick_ >> 6) : 0;
-        while (bucket < NUM_BUCKETS) {
+        if (best_ask_tick_ < 500000 && ask_levels_[best_ask_tick_] > 0) return best_ask_tick_;
+        for (size_t bucket = 0; bucket < NUM_BUCKETS; ++bucket) {
             uint64_t mask = ask_bitmap_[bucket];
-            if (bucket == (best_ask_tick_ >> 6)) {
-                mask &= ~((1ULL << ((best_ask_tick_ & 63) + 1)) - 1);
-            }
-            if (mask != 0) {
+            while (mask != 0) {
                 int bit = __builtin_ctzll(mask);
-                best_ask_tick_ = static_cast<uint32_t>((bucket << 6) | bit);
-                return best_ask_tick_;
+                uint32_t cand = static_cast<uint32_t>((bucket << 6) | bit);
+                if (cand < 500000 && ask_levels_[cand] > 0) {
+                    best_ask_tick_ = cand;
+                    return cand;
+                }
+                mask &= ~(1ULL << bit);
             }
-            ++bucket;
         }
         best_ask_tick_ = 0xFFFFFFFF;
         return 0xFFFFFFFF;
