@@ -96,6 +96,7 @@ struct QueueOrderEvent {
     uint64_t order_id;
     uint32_t shares;
     uint32_t price;
+    uint16_t stock_locate;
     char side;
     bool is_sentinel;
 };
@@ -140,6 +141,7 @@ int main(int argc, char* argv[]) {
 
         std::cout << "[+] Single-Threaded Best Time:       " << min_elapsed << " s\n";
         std::cout << "[+] Single-Threaded Peak Throughput: " << max_throughput << " M msg/sec\n";
+        std::cout << "[+] Sequence Gaps Detected:          " << stats.sequence_gaps << "\n";
 
         std::cout << "\n=== [MODE 2] TWO-THREAD SPSC PIPELINE (PARSER -> ALPHA ENGINE) ===\n";
         constexpr size_t RING_CAPACITY = 1048576;
@@ -201,8 +203,10 @@ int main(int argc, char* argv[]) {
                     mold_offset += sizeof(kestrel::MoldUDP64MessageBlock);
                     const uint8_t* msg_bytes = payload + mold_offset;
                     auto res = kestrel::parse_add_order_fast(msg_bytes);
+                    auto m = reinterpret_cast<const kestrel::ItchAddOrder*>(msg_bytes);
+                    uint16_t locate = kestrel::bswap16(m->stock_locate);
 
-                    QueueOrderEvent evt{res.order_id, res.shares, res.price, res.side, false};
+                    QueueOrderEvent evt{res.order_id, res.shares, res.price, locate, res.side, false};
                     while (!queue->push(evt)) {
                         _mm_pause();
                     }
@@ -213,7 +217,7 @@ int main(int argc, char* argv[]) {
                 offset += incl_len;
             }
 
-            QueueOrderEvent sentinel{0, 0, 0, 0, true};
+            QueueOrderEvent sentinel{0, 0, 0, 0, 0, true};
             while (!queue->push(sentinel)) {
                 _mm_pause();
             }
