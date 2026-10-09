@@ -18,7 +18,7 @@ struct BookOrder {
 
 class OrderBook {
 public:
-    static constexpr size_t MAP_CAPACITY = 1048576;
+    static constexpr size_t MAP_CAPACITY = 4194304;
     static constexpr size_t MAP_MASK = MAP_CAPACITY - 1;
     static constexpr uint64_t EMPTY_KEY = 0;
     static constexpr uint64_t DELETED_KEY = 0xFFFFFFFFFFFFFFFFULL;
