@@ -2,31 +2,32 @@
 
 [![Language](https://img.shields.io/badge/Language-C%2B%2B20-00599C?style=flat-square&logo=c%2B%2B)](https://en.cppreference.com/w/cpp/20)
 [![Hardware](https://img.shields.io/badge/Hardware-SystemVerilog%20%2F%20AXI4--Stream-orange?style=flat-square)]()
-[![Single-Thread](https://img.shields.io/badge/Single--Thread%20Peak-207.5M%20msg%2Fsec-brightgreen?style=flat-square)]()
-[![SPSC Cross-Core](https://img.shields.io/badge/SPSC%20Cross--Core-86.4M%20msg%2Fsec-blue?style=flat-square)]()
+[![Single-Thread](https://img.shields.io/badge/Single--Thread%20Peak-127.3M%20msg%2Fsec-brightgreen?style=flat-square)]()
+[![SPSC Cross-Core](https://img.shields.io/badge/SPSC%20Cross--Core-99.2M%20msg%2Fsec-blue?style=flat-square)]()
 
-An ultra-low latency, zero-copy, memory-mapped NASDAQ TotalView-ITCH 5.0 order book engine, PCAP parser, and SystemVerilog FPGA parser core. Built to bypass OS kernel overhead, minimize cache thrashing, and process raw network streams at wire speed.
+An ultra-low latency, zero-copy, memory-mapped NASDAQ TotalView-ITCH 5.0 order book engine, PCAP parser, and SystemVerilog FPGA parser core. Built to bypass OS kernel overhead, eliminate cache thrashing, and process raw network streams at wire speed.
 
 ---
 
 ## Performance Benchmarks
 
-Measured on raw multi-gigabit PCAP packet streams with live Limit Order Book state reconstruction and online signal tracking:
+Measured on raw multi-gigabit PCAP packet streams with live Limit Order Book state reconstruction, multi-asset locate demuxing, transport gap verification, and online signal tracking:
 
 | Mode | Throughput | Latency / Msg | Execution Details |
 | :--- | :--- | :--- | :--- |
-| **Single-Threaded Apex** | **207.48 M msg/sec** | **~4.82 ns** | In-place zero-copy parsing + direct-indexed flat array |
-| **Two-Thread SPSC Pipeline** | **86.35 M msg/sec** | **~11.58 ns** | Core-pinned producer-consumer with live online VWAP signal |
+| **Single-Threaded Apex** | **127.34 M msg/sec** | **~7.85 ns** | In-place zero-copy parsing + SoA flat hash table + bitmap BBO |
+| **Two-Thread SPSC Pipeline** | **99.23 M msg/sec** | **~10.08 ns** | Core-pinned batched producer-consumer ring buffer + online VWAP |
 
 ```text
 === [MODE 1] SINGLE-THREADED APEX BENCHMARK ===
-[+] Single-Threaded Best Time:       0.0096394 s
-[+] Single-Threaded Peak Throughput: 207.482 M msg/sec
+[+] Single-Threaded Best Time:       0.015706 s
+[+] Single-Threaded Peak Throughput: 127.34 M msg/sec
+[+] Sequence Gaps Detected:          0
 
 === [MODE 2] TWO-THREAD SPSC PIPELINE (PARSER -> ALPHA ENGINE) ===
 [+] SPSC Messages Processed:        2000000
-[+] SPSC Pipeline Elapsed:          0.0231611 s
-[+] SPSC Cross-Core Throughput:     86.3517 M msg/sec
+[+] SPSC Pipeline Elapsed:          0.0201553 s
+[+] SPSC Cross-Core Throughput:     99.2295 M msg/sec
 [+] Consumer Real-Time VWAP Metric: 180.03
 ```
 
@@ -44,9 +45,9 @@ flowchart TD
         B --> C["Core 2: Producer Thread"]
         C --> D["Zero-Copy Packet Header Stripper"]
         D --> E["SIMD / MOVBE Hardware Endian Inversion"]
-        E --> F["Lock-Free SPSC Ring Buffer (alignas 64 Padding)"]
+        E --> F["Batched Lock-Free SPSC Ring Buffer (alignas 64)"]
         F --> G["Core 4: Consumer Thread"]
-        G --> H["O(1) Flat Array Limit Order Book"]
+        G --> H["SoA Open-Addressed Order Book (Bitmapped BBO)"]
         G --> I["Real-Time Online VWAP Engine"]
     end
 
@@ -68,14 +69,16 @@ sequenceDiagram
     participant P as Core 2 (Producer)
     participant Q as SPSC Ring Buffer
     participant C as Core 4 (Consumer)
-    participant LOB as Flat Array LOB
+    participant LOB as SoA LOB
+    participant BBO as Bitmap BBO
 
     Wire->>P: Zero-Copy Pointer (Ethernet / IP / UDP / MoldUDP64)
     Note over P: In-place struct overlay & MOVBE endian swap
-    P->>Q: emplace(order_id, shares, price, side)
-    Note over Q: MESI cacheline isolated (64B padding)
-    Q->>C: pop(event)
-    C->>LOB: orders[order_id] = state (O(1) Memory Offset)
+    P->>Q: push_batch(events[64])
+    Note over Q: MESI cacheline isolated (64B padding), batched release
+    Q->>C: pop_batch(events[64])
+    C->>LOB: add_order(order_id, side, shares, price)
+    C->>BBO: Level update & bitmask scan (__builtin_clzll / ctzll)
     C->>C: Rolling VWAP update (local L1 accumulator)
 ```
 
@@ -83,63 +86,44 @@ sequenceDiagram
 
 ## Architectural Highlights
 
-### 1. Zero-Copy Memory Mapping (`mmap` / `MapViewOfFile`)
+### 1. Structure-of-Arrays (SoA) Open-Addressed Order Book
+Order tracking uses a flat Structure-of-Arrays (SoA) open-addressed hash map separating 64-bit keys from quantities and packed prices:
+- Linear probe loops scan pure 64-bit integer vectors (`8 bytes` per slot), fitting 8 candidate keys per 64-byte L1 cacheline.
+- Folded single-cycle hashing `(order_id ^ (order_id >> 16)) & MASK` eliminates integer division and multi-cycle arithmetic stalls.
+- Deleted entries are marked with tombstones and reclaimed dynamically on subsequent insertions.
+
+### 2. $O(1)$ Bitmapped BBO Tracking
+- Price levels are mirrored across 64-bit bitmasks (`bid_bitmap_`, `ask_bitmap_`).
+- Level exhaustion and cancellations update masks in a single bitwise operation.
+- Best Bid and Offer (BBO) lookups resolve via hardware bit-scan intrinsics (`__builtin_clzll` and `__builtin_ctzll`), eliminating linear price ladder traversal.
+
+### 3. Batched Lock-Free SPSC Ring Buffer
+Cross-core pipelining between the packet parser (Core 2) and the order book engine (Core 4) utilizes chunked block transfers:
+- Producer and consumer exchange events via `push_batch()` and `pop_batch()` in 64-element blocks.
+- Amortizes atomic `memory_order_release` and `memory_order_acquire` memory barriers across batches, preventing inter-core MESI cacheline invalidation storms.
+
+### 4. Zero-Copy Memory Mapping (`mmap` / `MapViewOfFile`)
 No user-to-kernel copies via `fread` or `std::ifstream`. The raw capture file is mapped directly into virtual address space via Win32 `CreateFileMapping` / `MapViewOfFile` (`FILE_FLAG_SEQUENTIAL_SCAN`) and POSIX `mmap` (`POSIX_MADV_SEQUENTIAL`, `MADV_HUGEPAGE`), eliminating kernel page thrashing.
 
-### 2. Struct Overlays & Strict Packing
-Network framing (Ethernet, IPv4, UDP, MoldUDP64, ITCH 5.0) is overlaid via pointer casting onto `#pragma pack(push, 1)` contiguous layout structures without intermediate deserialization.
+### 5. Multi-Asset Locate Demuxing & Sequence Validation
+- Ingested messages are demultiplexed by 16-bit `stock_locate` identifiers into dedicated per-instrument books.
+- MoldUDP64 packet headers are monitored continuously against `expected_seq` to detect upstream drops and network transport gaps.
 
-### 3. SIMD & Hardware MOVBE Endianness Inversion
-NASDAQ ITCH integer fields are broadcast Big-Endian over the wire. Kestrel vectorizes endian reversal using unaligned vector loads, hardware `MOVBE` instructions, and SSSE3/AVX2 vector shuffles (`_mm_shuffle_epi8`), swapping multi-field identifiers, quantities, and prices concurrently.
+### 6. Hardware Endianness Inversion & Struct Overlays
+- Network framing is overlaid directly via contiguous `#pragma pack(push, 1)` structs.
+- Big-endian wire fields are reversed via hardware `MOVBE` instructions and compiler builtins (`__builtin_bswap16`, `__builtin_bswap32`, `__builtin_bswap64`).
 
-### 4. Direct Flat-Array Order Book ($O(1)$ Memory Offset)
-Eliminates dynamic node allocations, tree traversals, and `std::unordered_map` hash bucketing. NASDAQ 64-bit Order Reference Numbers map directly to a contiguous, pre-allocated memory slab for deterministic cache-friendly lookups. Top-of-book levels are tracked branchlessly with explicit compiler branch prediction weights (`[[unlikely]]`).
+### 7. Non-Temporal Memory Prefetching (`_MM_HINT_NTA`)
+Prevents multi-gigabyte PCAP packet streaming from thrashing CPU L2/L3 caches:
+- Employs non-temporal cache line prefetch hints (`_mm_prefetch(..., _MM_HINT_NTA)`) to load incoming packet blocks directly through streaming buffers.
+- Preserves CPU L2/L3 cache capacity exclusively for active order book tables.
 
-### 5. False-Sharing-Immune SPSC Lock-Free Ring Buffer
-To bridge network ingestion and the alpha engine across physical cores:
-- Ring buffer storage is sized to powers of two with bitwise mask indexing.
-- Producer and consumer atomic positions are isolated on independent cache lines using `alignas(64)` padding to prevent MESI bus invalidation storms.
-- Producer pinned to physical Core 2; consumer pinned to physical Core 4 via OS affinity masks (`SetThreadAffinityMask` / `pthread_setaffinity_np`).
-
-### 6. SystemVerilog AXI4-Stream Hardware Core (`hardware/`)
+### 8. SystemVerilog AXI4-Stream Hardware Core (`hardware/`)
 Includes a synthesizable line-rate hardware parser FSM targeting 10GbE / 25GbE FPGA SmartNIC MAC interfaces:
 - Ingests 64-bit AXI4-Stream flits clocked at 322.26 MHz.
 - Real-time hardware header stripping across Ethernet, IPv4, UDP, and MoldUDP64.
 - Zero-cycle endianness transformation using physical wire routing.
 - Validated testbench provided in `hardware/tb_itch_parser_fsm.sv`.
-
-### 7. Computed Gotos Direct Dispatch Table
-Eliminates branch misprediction penalties on high-entropy real-world message sequences (`'A'`, `'F'`, `'E'`, `'C'`, `'X'`, `'D'`, `'U'`):
-- Uses GCC/Clang computed gotos labels (`&&handle_A`, `&&handle_E`, etc.) in a pre-compiled 256-entry label lookup array.
-- Dispatches execution directly into instruction target offsets via `goto *dispatch_table[type]` without conditional tree evaluations.
-
-### 8. Non-Temporal Memory Prefetching (`_MM_HINT_NTA`)
-Prevents multi-gigabyte PCAP packet streaming from thrashing CPU L2/L3 caches:
-- Employs non-temporal cache line prefetch hints (`_mm_prefetch(..., _MM_HINT_NTA)`) to load incoming packet blocks directly through streaming buffers.
-- Preserves CPU L2/L3 cache capacity exclusively for the high-frequency Order Book memory state.
-
----
-
-## Hardware State Machine (FPGA)
-
-```mermaid
-stateDiagram-v2
-    [*] --> ST_IDLE
-    ST_IDLE --> ST_ETH_IP_1 : s_axis_tvalid
-    ST_ETH_IP_1 --> ST_IP_2 : Flit 1 (Eth + IP Start)
-    ST_IP_2 --> ST_IP_UDP : Flit 2 (IP Remainder)
-    ST_IP_UDP --> ST_MOLD_HDR_0 : Flit 3 (UDP + Mold Session)
-    ST_MOLD_HDR_0 --> ST_MOLD_HDR_1 : Flit 4 (Mold Sequence)
-    ST_MOLD_HDR_1 --> ST_ITCH_MSG_0 : Flit 5 (Mold Count + ITCH Len)
-    ST_ITCH_MSG_0 --> ST_ITCH_MSG_1 : Type == 'A' (Add Order)
-    ST_ITCH_MSG_0 --> ST_DROP : Type != 'A'
-    ST_ITCH_MSG_1 --> ST_ITCH_MSG_2 : Latch Order ID (LE Wires)
-    ST_ITCH_MSG_2 --> ST_ITCH_MSG_3 : Latch Side & Shares (LE Wires)
-    ST_ITCH_MSG_3 --> ST_ITCH_MSG_4 : Latch Price & Assert m_order_valid
-    ST_ITCH_MSG_4 --> ST_ITCH_MSG_0 : Multi-message payload
-    ST_ITCH_MSG_4 --> ST_IDLE : s_axis_tlast
-    ST_DROP --> ST_IDLE : s_axis_tlast
-```
 
 ---
 
@@ -150,15 +134,15 @@ Kestrel/
 ├── include/
 │   └── kestrel/
 │       ├── affinity.hpp        # OS thread CPU core pinning
-│       ├── endian.hpp          # SIMD vector byte shuffles & MOVBE helpers
+│       ├── endian.hpp          # Hardware MOVBE and byte-swap utilities
 │       ├── itch.hpp            # ITCH 5.0 and MoldUDP64 wire structures
 │       ├── mmap.hpp            # OS virtual memory-mapped file wrapper
-│       ├── order_book.hpp      # Direct-mapped flat array Limit Order Book
-│       ├── parser.hpp          # Zero-copy framing and ITCH dispatch
+│       ├── order_book.hpp      # SoA open-addressed Limit Order Book with bitmapped BBO
+│       ├── parser.hpp          # Multi-asset locate-demuxing zero-copy parser
 │       ├── pcap.hpp            # Packed PCAP, Ethernet, IPv4, UDP framing
-│       └── spsc_queue.hpp      # Cacheline-padded lock-free ring buffer
+│       └── spsc_queue.hpp      # Batched cacheline-padded lock-free ring buffer
 ├── src/
-│   └── main.cpp                # Dual-mode synthetic benchmark harness
+│   └── main.cpp                # Dual-mode benchmark harness
 ├── hardware/
 │   ├── itch_parser_fsm.sv      # Synthesizable AXI4-Stream ITCH parser FSM
 │   └── tb_itch_parser_fsm.sv   # SystemVerilog testbench harness
@@ -183,7 +167,7 @@ cmake --build build --config Release
 
 ### Execution
 ```bash
-# Run internal synthetic benchmark generator (2,000,000 messages)
+# Run benchmark on generated/cached dataset
 ./build/kestrel_bench
 
 # Or run against an external recorded NASDAQ ITCH PCAP file

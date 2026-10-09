@@ -33,20 +33,33 @@ struct ParsedAddOrder {
 };
 
 inline ParsedAddOrder parse_add_order_fast(const uint8_t* msg_bytes) noexcept {
+#if defined(__MOVBE__) || defined(__AVX2__)
     uint64_t raw_oid;
     uint32_t raw_shares;
     uint32_t raw_price;
-
     __builtin_memcpy(&raw_oid, msg_bytes + 11, sizeof(uint64_t));
     __builtin_memcpy(&raw_shares, msg_bytes + 20, sizeof(uint32_t));
     __builtin_memcpy(&raw_price, msg_bytes + 32, sizeof(uint32_t));
-
     return {
         bswap64(raw_oid),
         bswap32(raw_shares),
         bswap32(raw_price),
         static_cast<char>(msg_bytes[19])
     };
+#else
+    uint64_t raw_oid;
+    uint32_t raw_shares;
+    uint32_t raw_price;
+    __builtin_memcpy(&raw_oid, msg_bytes + 11, sizeof(uint64_t));
+    __builtin_memcpy(&raw_shares, msg_bytes + 20, sizeof(uint32_t));
+    __builtin_memcpy(&raw_price, msg_bytes + 32, sizeof(uint32_t));
+    return {
+        bswap64(raw_oid),
+        bswap32(raw_shares),
+        bswap32(raw_price),
+        static_cast<char>(msg_bytes[19])
+    };
+#endif
 }
 
 }
