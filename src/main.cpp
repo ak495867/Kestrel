@@ -163,6 +163,9 @@ int main(int argc, char* argv[]) {
             while (true) {
                 if (queue->pop(evt)) {
                     if (evt.is_sentinel) break;
+                    if (__builtin_expect(total == 0, 0)) {
+                        consumer_start = std::chrono::high_resolution_clock::now();
+                    }
                     consumer_book.add_order(evt.order_id, evt.side, evt.shares, evt.price);
                     local_vwap_sum += static_cast<double>(evt.price) * evt.shares;
                     local_volume += evt.shares;

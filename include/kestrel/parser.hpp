@@ -6,6 +6,7 @@
 #include "order_book.hpp"
 #include <cstdint>
 #include <cstring>
+#include <immintrin.h>
 
 namespace kestrel {
 
@@ -32,7 +33,7 @@ public:
         size_t offset = sizeof(PcapFileHeader);
 
         while (offset + sizeof(PcapPacketHeader) <= file_size) {
-            __builtin_prefetch(data + offset + 256, 0, 1);
+            _mm_prefetch(reinterpret_cast<const char*>(data + offset + 256), _MM_HINT_NTA);
 
             auto pkt_hdr = reinterpret_cast<const PcapPacketHeader*>(data + offset);
             uint32_t incl_len = swap_pcap ? bswap32(pkt_hdr->incl_len) : pkt_hdr->incl_len;
@@ -104,6 +105,17 @@ private:
 
         if (msg_count == 0xFFFF) return;
 
+        static const void* dispatch_table[256] = {
+            [0 ... 255] = &&handle_default,
+            ['A'] = &&handle_A,
+            ['F'] = &&handle_F,
+            ['E'] = &&handle_E,
+            ['C'] = &&handle_C,
+            ['X'] = &&handle_X,
+            ['D'] = &&handle_D,
+            ['U'] = &&handle_U
+        };
+
         for (uint16_t i = 0; i < msg_count && mold_offset + sizeof(MoldUDP64MessageBlock) <= len; ++i) {
             auto block = reinterpret_cast<const MoldUDP64MessageBlock*>(payload + mold_offset);
             uint16_t msg_len = bswap16(block->message_length);
@@ -113,10 +125,108 @@ private:
 
             const uint8_t* msg_bytes = payload + mold_offset;
             if (i + 1 < msg_count && mold_offset + msg_len < len) {
-                __builtin_prefetch(payload + mold_offset + msg_len, 0, 0);
+                _mm_prefetch(reinterpret_cast<const char*>(payload + mold_offset + msg_len), _MM_HINT_NTA);
             }
 
-            dispatch_itch_message(msg_bytes, msg_len, stats, book);
+            if (__builtin_expect(msg_len == 0, 0)) {
+                mold_offset += msg_len;
+                continue;
+            }
+
+            stats.itch_messages++;
+            uint8_t type = msg_bytes[0];
+            goto *dispatch_table[type];
+
+        handle_A: {
+            if (__builtin_expect(msg_len < sizeof(ItchAddOrder), 0)) goto next_msg;
+            stats.add_orders++;
+            if (book) {
+                auto res = parse_add_order_fast(msg_bytes);
+                book->add_order(res.order_id, res.side, res.shares, res.price);
+            }
+            goto next_msg;
+        }
+
+        handle_F: {
+            if (__builtin_expect(msg_len < sizeof(ItchAddOrderMPID), 0)) goto next_msg;
+            stats.add_orders++;
+            if (book) {
+                auto m = reinterpret_cast<const ItchAddOrderMPID*>(msg_bytes);
+                uint64_t oid = bswap64(m->order_reference_number);
+                uint32_t shares = bswap32(m->shares);
+                uint32_t px = bswap32(m->price);
+                book->add_order(oid, m->buy_sell_indicator, shares, px);
+            }
+            goto next_msg;
+        }
+
+        handle_E: {
+            if (__builtin_expect(msg_len < sizeof(ItchOrderExecuted), 0)) goto next_msg;
+            stats.executed_orders++;
+            if (book) {
+                auto m = reinterpret_cast<const ItchOrderExecuted*>(msg_bytes);
+                uint64_t oid = bswap64(m->order_reference_number);
+                uint32_t shares = bswap32(m->executed_shares);
+                book->execute_order(oid, shares);
+            }
+            goto next_msg;
+        }
+
+        handle_C: {
+            if (__builtin_expect(msg_len < sizeof(ItchOrderExecutedWithPrice), 0)) goto next_msg;
+            stats.executed_orders++;
+            if (book) {
+                auto m = reinterpret_cast<const ItchOrderExecutedWithPrice*>(msg_bytes);
+                uint64_t oid = bswap64(m->order_reference_number);
+                uint32_t shares = bswap32(m->executed_shares);
+                book->execute_order(oid, shares);
+            }
+            goto next_msg;
+        }
+
+        handle_X: {
+            if (__builtin_expect(msg_len < sizeof(ItchOrderCancel), 0)) goto next_msg;
+            stats.canceled_orders++;
+            if (book) {
+                auto m = reinterpret_cast<const ItchOrderCancel*>(msg_bytes);
+                uint64_t oid = bswap64(m->order_reference_number);
+                uint32_t shares = bswap32(m->canceled_shares);
+                book->cancel_order(oid, shares);
+            }
+            goto next_msg;
+        }
+
+        handle_D: {
+            if (__builtin_expect(msg_len < sizeof(ItchOrderDelete), 0)) goto next_msg;
+            stats.deleted_orders++;
+            if (book) {
+                auto m = reinterpret_cast<const ItchOrderDelete*>(msg_bytes);
+                uint64_t oid = bswap64(m->order_reference_number);
+                book->delete_order(oid);
+            }
+            goto next_msg;
+        }
+
+        handle_U: {
+            if (__builtin_expect(msg_len < sizeof(ItchOrderReplace), 0)) goto next_msg;
+            stats.replaced_orders++;
+            if (book) {
+                auto m = reinterpret_cast<const ItchOrderReplace*>(msg_bytes);
+                uint64_t old_oid = bswap64(m->original_order_reference_number);
+                uint64_t new_oid = bswap64(m->new_order_reference_number);
+                uint32_t shares = bswap32(m->shares);
+                uint32_t px = bswap32(m->price);
+                book->replace_order(old_oid, new_oid, shares, px);
+            }
+            goto next_msg;
+        }
+
+        handle_default: {
+            stats.other_messages++;
+            goto next_msg;
+        }
+
+        next_msg:
             mold_offset += msg_len;
         }
     }
