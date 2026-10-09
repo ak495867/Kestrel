@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <vector>
-#include <array>
 #include <iostream>
 #include <iomanip>
 #include <string>
@@ -35,10 +34,10 @@ public:
         if (__builtin_expect(tick < max_price_ticks_, 1)) {
             if (side == 'B') {
                 bid_levels_[tick] += shares;
-                best_bid_tick_ = std::max(best_bid_tick_, tick);
+                best_bid_tick_ = (tick > best_bid_tick_) ? tick : best_bid_tick_;
             } else {
                 ask_levels_[tick] += shares;
-                best_ask_tick_ = std::min(best_ask_tick_, tick);
+                best_ask_tick_ = (tick < best_ask_tick_) ? tick : best_ask_tick_;
             }
         }
     }
@@ -121,17 +120,9 @@ private:
     inline void reduce_level(char side, uint32_t tick, uint32_t shares) noexcept {
         if (__builtin_expect(tick >= max_price_ticks_, 0)) return;
         if (side == 'B') {
-            if (bid_levels_[tick] <= shares) {
-                bid_levels_[tick] = 0;
-            } else {
-                bid_levels_[tick] -= shares;
-            }
+            bid_levels_[tick] = (bid_levels_[tick] <= shares) ? 0 : (bid_levels_[tick] - shares);
         } else {
-            if (ask_levels_[tick] <= shares) {
-                ask_levels_[tick] = 0;
-            } else {
-                ask_levels_[tick] -= shares;
-            }
+            ask_levels_[tick] = (ask_levels_[tick] <= shares) ? 0 : (ask_levels_[tick] - shares);
         }
     }
 
