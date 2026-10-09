@@ -108,6 +108,16 @@ Includes a synthesizable line-rate hardware parser FSM targeting 10GbE / 25GbE F
 - Zero-cycle endianness transformation using physical wire routing.
 - Validated testbench provided in `hardware/tb_itch_parser_fsm.sv`.
 
+### 7. Computed Gotos Direct Dispatch Table
+Eliminates branch misprediction penalties on high-entropy real-world message sequences (`'A'`, `'F'`, `'E'`, `'C'`, `'X'`, `'D'`, `'U'`):
+- Uses GCC/Clang computed gotos labels (`&&handle_A`, `&&handle_E`, etc.) in a pre-compiled 256-entry label lookup array.
+- Dispatches execution directly into instruction target offsets via `goto *dispatch_table[type]` without conditional tree evaluations.
+
+### 8. Non-Temporal Memory Prefetching (`_MM_HINT_NTA`)
+Prevents multi-gigabyte PCAP packet streaming from thrashing CPU L2/L3 caches:
+- Employs non-temporal cache line prefetch hints (`_mm_prefetch(..., _MM_HINT_NTA)`) to load incoming packet blocks directly through streaming buffers.
+- Preserves CPU L2/L3 cache capacity exclusively for the high-frequency Order Book memory state.
+
 ---
 
 ## Hardware State Machine (FPGA)
