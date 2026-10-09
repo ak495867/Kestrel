@@ -1,11 +1,12 @@
-# Kestrel: Wire-Speed NASDAQ ITCH 5.0 PCAP Engine (C++20 / SIMD / SystemVerilog)
+# Kestrel: Wire-Speed NASDAQ ITCH 5.0 PCAP Engine (C++20 / SIMD / SystemVerilog / Linux Kernel-Bypass)
 
 [![Language](https://img.shields.io/badge/Language-C%2B%2B20-00599C?style=flat-square&logo=c%2B%2B)](https://en.cppreference.com/w/cpp/20)
 [![Hardware](https://img.shields.io/badge/Hardware-SystemVerilog%20%2F%20AXI4--Stream-orange?style=flat-square)]()
-[![Single-Thread](https://img.shields.io/badge/Single--Thread%20Peak-127.3M%20msg%2Fsec-brightgreen?style=flat-square)]()
-[![SPSC Cross-Core](https://img.shields.io/badge/SPSC%20Cross--Core-99.2M%20msg%2Fsec-blue?style=flat-square)]()
+[![Kernel-Bypass](https://img.shields.io/badge/Kernel--Bypass-PCIe%20DMA%20UIO-red?style=flat-square)]()
+[![Single-Thread](https://img.shields.io/badge/Single--Thread%20Peak-168.6M%20msg%2Fsec-brightgreen?style=flat-square)]()
+[![SPSC Cross-Core](https://img.shields.io/badge/SPSC%20Cross--Core-97.6M%20msg%2Fsec-blue?style=flat-square)]()
 
-An ultra-low latency, zero-copy, memory-mapped NASDAQ TotalView-ITCH 5.0 order book engine, PCAP parser, and SystemVerilog FPGA parser core. Built to bypass OS kernel overhead, eliminate cache thrashing, and process raw network streams at wire speed.
+An ultra-low latency, zero-copy, memory-mapped NASDAQ TotalView-ITCH 5.0 order book engine, PCAP parser, synthesizable SystemVerilog FPGA parser core, and dedicated Linux PCIe kernel-bypass driver. Built to bypass OS network stack overhead, eliminate CPU cache thrashing, and process raw market streams at wire speed.
 
 ---
 
@@ -15,20 +16,26 @@ Measured on raw multi-gigabit PCAP packet streams with live Limit Order Book sta
 
 | Mode | Throughput | Latency / Msg | Execution Details |
 | :--- | :--- | :--- | :--- |
-| **Single-Threaded Apex** | **127.34 M msg/sec** | **~7.85 ns** | In-place zero-copy parsing + SoA flat hash table + bitmap BBO |
-| **Two-Thread SPSC Pipeline** | **99.23 M msg/sec** | **~10.08 ns** | Core-pinned batched producer-consumer ring buffer + online VWAP |
+| **Single-Threaded Apex** | **168.59 M msg/sec** | **~5.93 ns** | In-place zero-copy parsing + SoA flat hash table + bitmap BBO |
+| **Two-Thread SPSC Pipeline** | **97.61 M msg/sec** | **~10.25 ns** | Core-pinned batched producer-consumer ring buffer + online VWAP |
+| **Kernel-Bypass DMA Ingestion** | **61.17 M desc/sec** | **~16.35 ns** | Zero-copy PCIe circular ring descriptor polling + book update |
 
 ```text
 === [MODE 1] SINGLE-THREADED APEX BENCHMARK ===
-[+] Single-Threaded Best Time:       0.015706 s
-[+] Single-Threaded Peak Throughput: 127.34 M msg/sec
+[+] Single-Threaded Best Time:       0.0118631 s
+[+] Single-Threaded Peak Throughput: 168.59 M msg/sec
 [+] Sequence Gaps Detected:          0
 
 === [MODE 2] TWO-THREAD SPSC PIPELINE (PARSER -> ALPHA ENGINE) ===
 [+] SPSC Messages Processed:        2000000
-[+] SPSC Pipeline Elapsed:          0.0201553 s
-[+] SPSC Cross-Core Throughput:     99.2295 M msg/sec
+[+] SPSC Pipeline Elapsed:          0.0204906 s
+[+] SPSC Cross-Core Throughput:     97.6057 M msg/sec
 [+] Consumer Real-Time VWAP Metric: 180.03
+
+=== [MODE 3] CUSTOM KERNEL-BYPASS DMA INGESTION ===
+[+] Kernel-Bypass Ingestion Messages: 1000000
+[+] Ingestion Elapsed:                0.0163476 s
+[+] Kernel-Bypass Ingestion Rate:     61.1711 M desc/sec
 ```
 
 ---
@@ -51,10 +58,13 @@ flowchart TD
         G --> I["Real-Time Online VWAP Engine"]
     end
 
-    subgraph HARDWARE["FPGA Offload Option (SystemVerilog)"]
+    subgraph HARDWARE["FPGA Offload & Kernel Bypass"]
         J["10GbE MAC (AXI4-Stream 64-bit)"] --> K["itch_parser_fsm.sv"]
         K --> L["Zero-Cycle Endian Permutation Wires"]
-        L --> M["PCIe DMA Engine -> SPSC Queue"]
+        L --> M["PCIe DMA Engine -> Physical Host Memory"]
+        M --> N["kestrel_uio Kernel Driver (dma_alloc_coherent)"]
+        N --> O["KernelBypassDevice (User-Space remap_pfn_range)"]
+        O --> H
     end
 ```
 
@@ -65,21 +75,18 @@ flowchart TD
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Wire as PCAP / NIC Wire
-    participant P as Core 2 (Producer)
-    participant Q as SPSC Ring Buffer
-    participant C as Core 4 (Consumer)
+    participant NIC as FPGA SmartNIC / Wire
+    participant Driver as Kernel Module (kestrel_uio)
+    participant Client as User-Space Ingestion
     participant LOB as SoA LOB
     participant BBO as Bitmap BBO
 
-    Wire->>P: Zero-Copy Pointer (Ethernet / IP / UDP / MoldUDP64)
-    Note over P: In-place struct overlay & MOVBE endian swap
-    P->>Q: push_batch(events[64])
-    Note over Q: MESI cacheline isolated (64B padding), batched release
-    Q->>C: pop_batch(events[64])
-    C->>LOB: add_order(order_id, side, shares, price)
-    C->>BBO: Level update & bitmask scan (__builtin_clzll / ctzll)
-    C->>C: Rolling VWAP update (local L1 accumulator)
+    NIC->>NIC: Hardware header strip + wire endianness swap
+    NIC->>Driver: Scatter-Gather DMA into Coherent Host Ring
+    Driver->>Client: Zero-copy userspace memory mapping (pgprot_noncached)
+    Client->>Client: poll_batch(DmaOrderDescriptor[64])
+    Client->>LOB: add_order(order_id, side, shares, price)
+    LOB->>BBO: Level update & hardware bitmask scan (__builtin_clzll / ctzll)
 ```
 
 ---
@@ -109,9 +116,10 @@ No user-to-kernel copies via `fread` or `std::ifstream`. The raw capture file is
 - Ingested messages are demultiplexed by 16-bit `stock_locate` identifiers into dedicated per-instrument books.
 - MoldUDP64 packet headers are monitored continuously against `expected_seq` to detect upstream drops and network transport gaps.
 
-### 6. Hardware Endianness Inversion & Struct Overlays
-- Network framing is overlaid directly via contiguous `#pragma pack(push, 1)` structs.
-- Big-endian wire fields are reversed via hardware `MOVBE` instructions and compiler builtins (`__builtin_bswap16`, `__builtin_bswap32`, `__builtin_bswap64`).
+### 6. Custom OS Kernel-Bypass Driver (`hardware/driver/`)
+To eliminate socket buffer copies and kernel network stack context switches:
+- **Kernel Module (`kestrel_uio.c`):** Allocates a contiguous $8\,\text{MB}$ circular ring via `dma_alloc_coherent()`, writes the 64-bit physical DMA address directly to FPGA BAR0 MMIO registers, and maps it directly into user-space via `remap_pfn_range()`.
+- **User-Space API (`kernel_bypass.hpp`):** Polls descriptors in 64-item batches via lock-free memory barriers, supporting zero-overhead handoff directly into the SoA order book engine.
 
 ### 7. Non-Temporal Memory Prefetching (`_MM_HINT_NTA`)
 Prevents multi-gigabyte PCAP packet streaming from thrashing CPU L2/L3 caches:
@@ -134,16 +142,22 @@ Kestrel/
 ├── include/
 │   └── kestrel/
 │       ├── affinity.hpp        # OS thread CPU core pinning
+│       ├── driver_abi.hpp      # PCIe MMIO registers and DMA descriptor ABI
 │       ├── endian.hpp          # Hardware MOVBE and byte-swap utilities
 │       ├── itch.hpp            # ITCH 5.0 and MoldUDP64 wire structures
+│       ├── kernel_bypass.hpp   # Zero-copy userspace kernel-bypass driver client
 │       ├── mmap.hpp            # OS virtual memory-mapped file wrapper
 │       ├── order_book.hpp      # SoA open-addressed Limit Order Book with bitmapped BBO
 │       ├── parser.hpp          # Multi-asset locate-demuxing zero-copy parser
 │       ├── pcap.hpp            # Packed PCAP, Ethernet, IPv4, UDP framing
 │       └── spsc_queue.hpp      # Batched cacheline-padded lock-free ring buffer
 ├── src/
-│   └── main.cpp                # Dual-mode benchmark harness
+│   ├── main.cpp                # Dual-mode benchmark harness
+│   └── test_bypass.cpp         # Kernel-bypass DMA ingestion test harness
 ├── hardware/
+│   ├── driver/
+│   │   ├── Makefile            # Linux kernel module build script
+│   │   └── kestrel_uio.c       # Linux zero-copy PCIe DMA driver module
 │   ├── itch_parser_fsm.sv      # Synthesizable AXI4-Stream ITCH parser FSM
 │   └── tb_itch_parser_fsm.sv   # SystemVerilog testbench harness
 ├── CMakeLists.txt              # C++20, -O3, -flto, -mavx2 build pipeline
@@ -167,9 +181,12 @@ cmake --build build --config Release
 
 ### Execution
 ```bash
-# Run benchmark on generated/cached dataset
+# Run full benchmark harness on generated/cached dataset
 ./build/kestrel_bench
 
 # Or run against an external recorded NASDAQ ITCH PCAP file
 ./build/kestrel_bench /path/to/capture.pcap
+
+# Run kernel-bypass DMA ingestion benchmark
+./build/kestrel_bypass_test
 ```
