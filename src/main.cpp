@@ -1,11 +1,15 @@
 #include "kestrel/mmap.hpp"
 #include "kestrel/parser.hpp"
 #include "kestrel/order_book.hpp"
+#include "kestrel/spsc_queue.hpp"
+#include "kestrel/affinity.hpp"
 #include <iostream>
 #include <fstream>
 #include <chrono>
 #include <vector>
 #include <cstring>
+#include <thread>
+#include <atomic>
 
 static void generate_synthetic_pcap(const std::string& path, size_t message_count) {
     std::ofstream out(path, std::ios::binary);
@@ -88,6 +92,14 @@ static void generate_synthetic_pcap(const std::string& path, size_t message_coun
     }
 }
 
+struct QueueOrderEvent {
+    uint64_t order_id;
+    uint32_t shares;
+    uint32_t price;
+    char side;
+    bool is_sentinel;
+};
+
 int main(int argc, char* argv[]) {
     std::string pcap_path = "sample_nasdaq.pcap";
 
@@ -103,11 +115,10 @@ int main(int argc, char* argv[]) {
         kestrel::MemoryMappedFile mmap_file(pcap_path);
         std::cout << "[+] Successfully mapped " << mmap_file.size() << " bytes.\n";
 
+        std::cout << "\n=== [MODE 1] SINGLE-THREADED APEX BENCHMARK ===\n";
         kestrel::PcapItchParser parser;
-        kestrel::OrderBook book;
-
-        std::cout << "[*] Warmup & parsing raw packets & rebuilding Limit Order Book...\n";
-        parser.parse(mmap_file.data(), mmap_file.size(), &book);
+        kestrel::OrderBook warm_book;
+        parser.parse(mmap_file.data(), mmap_file.size(), &warm_book);
 
         kestrel::ParserStats stats{};
         double min_elapsed = 1e9;
@@ -127,19 +138,99 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        std::cout << "\n================ BENCHMARK RESULTS ================\n";
-        std::cout << "[+] Total Packets:    " << stats.total_packets << "\n";
-        std::cout << "[+] ITCH Messages:    " << stats.itch_messages << "\n";
-        std::cout << "[+] Add Orders:       " << stats.add_orders << "\n";
-        std::cout << "[+] Executed Orders:  " << stats.executed_orders << "\n";
-        std::cout << "[+] Canceled Orders:  " << stats.canceled_orders << "\n";
-        std::cout << "[+] Deleted Orders:   " << stats.deleted_orders << "\n";
-        std::cout << "[+] Replaced Orders:  " << stats.replaced_orders << "\n";
-        std::cout << "[+] Best Elapsed:     " << min_elapsed << " seconds\n";
-        std::cout << "[+] Peak Throughput:  " << max_throughput << " M msg/sec\n";
-        std::cout << "===================================================\n";
+        std::cout << "[+] Single-Threaded Best Time:       " << min_elapsed << " s\n";
+        std::cout << "[+] Single-Threaded Peak Throughput: " << max_throughput << " M msg/sec\n";
 
-        book.print_top(5);
+        std::cout << "\n=== [MODE 2] TWO-THREAD SPSC PIPELINE (PARSER -> ALPHA ENGINE) ===\n";
+        constexpr size_t RING_CAPACITY = 1048576;
+        auto queue = std::make_unique<kestrel::SPSCQueue<QueueOrderEvent, RING_CAPACITY>>();
+        kestrel::OrderBook consumer_book;
+
+        std::atomic<uint64_t> consumer_processed{0};
+        std::atomic<double> vwap_sum{0.0};
+        std::atomic<uint64_t> vwap_volume{0};
+
+        auto consumer_start = std::chrono::high_resolution_clock::now();
+        std::chrono::high_resolution_clock::time_point consumer_end;
+
+        std::thread consumer([&]() {
+            kestrel::set_current_thread_affinity(4);
+            QueueOrderEvent evt{};
+            uint64_t total = 0;
+            double local_vwap_sum = 0.0;
+            uint64_t local_volume = 0;
+
+            while (true) {
+                if (queue->pop(evt)) {
+                    if (evt.is_sentinel) break;
+                    consumer_book.add_order(evt.order_id, evt.side, evt.shares, evt.price);
+                    local_vwap_sum += static_cast<double>(evt.price) * evt.shares;
+                    local_volume += evt.shares;
+                    total++;
+                } else {
+                    _mm_pause();
+                }
+            }
+            consumer_end = std::chrono::high_resolution_clock::now();
+            consumer_processed.store(total);
+            vwap_sum.store(local_vwap_sum);
+            vwap_volume.store(local_volume);
+        });
+
+        std::thread producer([&]() {
+            kestrel::set_current_thread_affinity(2);
+            const uint8_t* data = mmap_file.data();
+            size_t file_size = mmap_file.size();
+            size_t offset = sizeof(kestrel::PcapFileHeader);
+
+            while (offset + sizeof(kestrel::PcapPacketHeader) <= file_size) {
+                auto pkt_hdr = reinterpret_cast<const kestrel::PcapPacketHeader*>(data + offset);
+                uint32_t incl_len = pkt_hdr->incl_len;
+                offset += sizeof(kestrel::PcapPacketHeader);
+                if (offset + incl_len > file_size) break;
+
+                const uint8_t* payload = data + offset + sizeof(kestrel::EthernetHeader) + sizeof(kestrel::IPv4Header) + sizeof(kestrel::UdpHeader);
+                auto mold = reinterpret_cast<const kestrel::MoldUDP64Header*>(payload);
+                uint16_t msg_count = kestrel::bswap16(mold->message_count);
+                size_t mold_offset = sizeof(kestrel::MoldUDP64Header);
+
+                for (uint16_t i = 0; i < msg_count; ++i) {
+                    mold_offset += sizeof(kestrel::MoldUDP64MessageBlock);
+                    const uint8_t* msg_bytes = payload + mold_offset;
+                    auto res = kestrel::parse_add_order_fast(msg_bytes);
+
+                    QueueOrderEvent evt{res.order_id, res.shares, res.price, res.side, false};
+                    while (!queue->push(evt)) {
+                        _mm_pause();
+                    }
+
+                    mold_offset += sizeof(kestrel::ItchAddOrder);
+                }
+
+                offset += incl_len;
+            }
+
+            QueueOrderEvent sentinel{0, 0, 0, 0, true};
+            while (!queue->push(sentinel)) {
+                _mm_pause();
+            }
+        });
+
+        producer.join();
+        consumer.join();
+
+        std::chrono::duration<double> diff2 = consumer_end - consumer_start;
+        double spsc_elapsed = diff2.count();
+        double spsc_throughput = consumer_processed.load() / spsc_elapsed / 1e6;
+        double vwap = (vwap_volume.load() > 0) ? (vwap_sum.load() / vwap_volume.load() / 10000.0) : 0.0;
+
+        std::cout << "[+] SPSC Messages Processed:        " << consumer_processed.load() << "\n";
+        std::cout << "[+] SPSC Pipeline Elapsed:          " << spsc_elapsed << " s\n";
+        std::cout << "[+] SPSC Cross-Core Throughput:     " << spsc_throughput << " M msg/sec\n";
+        std::cout << "[+] Consumer Real-Time VWAP Metric: " << vwap << "\n";
+        std::cout << "========================================================\n";
+
+        consumer_book.print_top(5);
 
     } catch (const std::exception& e) {
         std::cerr << "[-] Error: " << e.what() << "\n";
