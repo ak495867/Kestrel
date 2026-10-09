@@ -2,80 +2,93 @@
 
 #include <cstdint>
 #include <vector>
-#include <unordered_map>
-#include <map>
+#include <array>
 #include <iostream>
 #include <iomanip>
 #include <string>
+#include <algorithm>
 
 namespace kestrel {
 
 struct BookOrder {
-    uint64_t order_id{0};
     uint32_t shares{0};
     uint32_t price{0};
-    char side{'B'};
+    char side{0};
 };
 
 class OrderBook {
 public:
-    void add_order(uint64_t order_id, char side, uint32_t shares, uint32_t price) {
-        orders_[order_id] = {order_id, shares, price, side};
-        if (side == 'B') {
-            bids_[price] += shares;
-        } else {
-            asks_[price] += shares;
+    explicit OrderBook(size_t max_orders = 10'000'000, uint32_t max_price_ticks = 500'000)
+        : max_orders_(max_orders), max_price_ticks_(max_price_ticks) {
+        orders_.resize(max_orders_);
+        bid_levels_.resize(max_price_ticks_, 0);
+        ask_levels_.resize(max_price_ticks_, 0);
+    }
+
+    inline void add_order(uint64_t order_id, char side, uint32_t shares, uint32_t price) noexcept {
+        if (__builtin_expect(order_id < max_orders_, 1)) {
+            orders_[order_id] = {shares, price, side};
+            active_orders_++;
+        }
+
+        uint32_t tick = price / 100;
+        if (__builtin_expect(tick < max_price_ticks_, 1)) {
+            if (side == 'B') {
+                bid_levels_[tick] += shares;
+                best_bid_tick_ = std::max(best_bid_tick_, tick);
+            } else {
+                ask_levels_[tick] += shares;
+                best_ask_tick_ = std::min(best_ask_tick_, tick);
+            }
         }
     }
 
-    void execute_order(uint64_t order_id, uint32_t shares) {
-        auto it = orders_.find(order_id);
-        if (it == orders_.end()) return;
+    inline void execute_order(uint64_t order_id, uint32_t shares) noexcept {
+        if (__builtin_expect(order_id >= max_orders_, 0)) return;
+        auto& ord = orders_[order_id];
+        if (!ord.side) return;
 
-        if (it->second.shares <= shares) {
-            remove_price_level(it->second.side, it->second.price, it->second.shares);
-            orders_.erase(it);
+        uint32_t tick = ord.price / 100;
+        if (ord.shares <= shares) {
+            reduce_level(ord.side, tick, ord.shares);
+            ord.side = 0;
+            active_orders_--;
         } else {
-            it->second.shares -= shares;
-            reduce_price_level(it->second.side, it->second.price, shares);
+            ord.shares -= shares;
+            reduce_level(ord.side, tick, shares);
         }
     }
 
-    void cancel_order(uint64_t order_id, uint32_t shares) {
-        auto it = orders_.find(order_id);
-        if (it == orders_.end()) return;
-
-        if (it->second.shares <= shares) {
-            remove_price_level(it->second.side, it->second.price, it->second.shares);
-            orders_.erase(it);
-        } else {
-            it->second.shares -= shares;
-            reduce_price_level(it->second.side, it->second.price, shares);
-        }
+    inline void cancel_order(uint64_t order_id, uint32_t shares) noexcept {
+        execute_order(order_id, shares);
     }
 
-    void delete_order(uint64_t order_id) {
-        auto it = orders_.find(order_id);
-        if (it == orders_.end()) return;
+    inline void delete_order(uint64_t order_id) noexcept {
+        if (__builtin_expect(order_id >= max_orders_, 0)) return;
+        auto& ord = orders_[order_id];
+        if (!ord.side) return;
 
-        remove_price_level(it->second.side, it->second.price, it->second.shares);
-        orders_.erase(it);
+        uint32_t tick = ord.price / 100;
+        reduce_level(ord.side, tick, ord.shares);
+        ord.side = 0;
+        active_orders_--;
     }
 
-    void replace_order(uint64_t old_order_id, uint64_t new_order_id, uint32_t new_shares, uint32_t new_price) {
-        auto it = orders_.find(old_order_id);
-        if (it == orders_.end()) return;
+    inline void replace_order(uint64_t old_order_id, uint64_t new_order_id, uint32_t new_shares, uint32_t new_price) noexcept {
+        if (__builtin_expect(old_order_id >= max_orders_, 0)) return;
+        auto& ord = orders_[old_order_id];
+        char side = ord.side;
+        if (!side) return;
 
-        char side = it->second.side;
-        remove_price_level(side, it->second.price, it->second.shares);
-        orders_.erase(it);
+        uint32_t old_tick = ord.price / 100;
+        reduce_level(side, old_tick, ord.shares);
+        ord.side = 0;
+        active_orders_--;
 
         add_order(new_order_id, side, new_shares, new_price);
     }
 
-    [[nodiscard]] size_t order_count() const noexcept { return orders_.size(); }
-    [[nodiscard]] size_t bid_depth() const noexcept { return bids_.size(); }
-    [[nodiscard]] size_t ask_depth() const noexcept { return asks_.size(); }
+    [[nodiscard]] size_t order_count() const noexcept { return active_orders_; }
 
     void print_top(size_t levels = 5) const {
         std::cout << "\n========== ORDER BOOK TOP " << levels << " ==========\n";
@@ -83,48 +96,54 @@ public:
                   << " || " << std::setw(10) << "ASK PX" << " | " << std::setw(12) << "ASK QTY\n";
         std::cout << "--------------------------------------------------------\n";
 
-        auto bid_it = bids_.begin();
-        auto ask_it = asks_.begin();
+        uint32_t b_tick = best_bid_tick_;
+        uint32_t a_tick = best_ask_tick_;
 
         for (size_t i = 0; i < levels; ++i) {
-            std::string bid_str = (bid_it != bids_.end()) ? std::to_string(bid_it->second) : "-";
-            std::string bid_px  = (bid_it != bids_.end()) ? std::to_string(bid_it->first / 10000.0) : "-";
-            std::string ask_px  = (ask_it != asks_.end()) ? std::to_string(ask_it->first / 10000.0) : "-";
-            std::string ask_str = (ask_it != asks_.end()) ? std::to_string(ask_it->second) : "-";
+            while (b_tick > 0 && bid_levels_[b_tick] == 0) --b_tick;
+            while (a_tick < max_price_ticks_ && ask_levels_[a_tick] == 0) ++a_tick;
+
+            std::string bid_str = (b_tick > 0 && bid_levels_[b_tick] > 0) ? std::to_string(bid_levels_[b_tick]) : "-";
+            std::string bid_px  = (b_tick > 0 && bid_levels_[b_tick] > 0) ? std::to_string((b_tick * 100) / 10000.0) : "-";
+            std::string ask_px  = (a_tick < max_price_ticks_ && ask_levels_[a_tick] > 0) ? std::to_string((a_tick * 100) / 10000.0) : "-";
+            std::string ask_str = (a_tick < max_price_ticks_ && ask_levels_[a_tick] > 0) ? std::to_string(ask_levels_[a_tick]) : "-";
 
             std::cout << std::setw(12) << bid_str << " | " << std::setw(10) << bid_px
                       << " || " << std::setw(10) << ask_px << " | " << std::setw(12) << ask_str << "\n";
 
-            if (bid_it != bids_.end()) ++bid_it;
-            if (ask_it != asks_.end()) ++ask_it;
+            if (b_tick > 0) --b_tick;
+            if (a_tick < max_price_ticks_) ++a_tick;
         }
         std::cout << "========================================================\n\n";
     }
 
 private:
-    void reduce_price_level(char side, uint32_t price, uint32_t shares) {
+    inline void reduce_level(char side, uint32_t tick, uint32_t shares) noexcept {
+        if (__builtin_expect(tick >= max_price_ticks_, 0)) return;
         if (side == 'B') {
-            auto it = bids_.find(price);
-            if (it != bids_.end()) {
-                if (it->second <= shares) bids_.erase(it);
-                else it->second -= shares;
+            if (bid_levels_[tick] <= shares) {
+                bid_levels_[tick] = 0;
+            } else {
+                bid_levels_[tick] -= shares;
             }
         } else {
-            auto it = asks_.find(price);
-            if (it != asks_.end()) {
-                if (it->second <= shares) asks_.erase(it);
-                else it->second -= shares;
+            if (ask_levels_[tick] <= shares) {
+                ask_levels_[tick] = 0;
+            } else {
+                ask_levels_[tick] -= shares;
             }
         }
     }
 
-    void remove_price_level(char side, uint32_t price, uint32_t shares) {
-        reduce_price_level(side, price, shares);
-    }
+    size_t max_orders_;
+    uint32_t max_price_ticks_;
+    size_t active_orders_{0};
+    uint32_t best_bid_tick_{0};
+    uint32_t best_ask_tick_{0xFFFFFFFF};
 
-    std::unordered_map<uint64_t, BookOrder> orders_;
-    std::map<uint32_t, uint64_t, std::greater<uint32_t>> bids_;
-    std::map<uint32_t, uint64_t, std::less<uint32_t>> asks_;
+    std::vector<BookOrder> orders_;
+    std::vector<uint64_t> bid_levels_;
+    std::vector<uint64_t> ask_levels_;
 };
 
 }

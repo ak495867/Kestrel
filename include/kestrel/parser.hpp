@@ -6,7 +6,6 @@
 #include "order_book.hpp"
 #include <cstdint>
 #include <cstring>
-#include <unordered_map>
 
 namespace kestrel {
 
@@ -33,6 +32,8 @@ public:
         size_t offset = sizeof(PcapFileHeader);
 
         while (offset + sizeof(PcapPacketHeader) <= file_size) {
+            __builtin_prefetch(data + offset + 256, 0, 1);
+
             auto pkt_hdr = reinterpret_cast<const PcapPacketHeader*>(data + offset);
             uint32_t incl_len = swap_pcap ? bswap32(pkt_hdr->incl_len) : pkt_hdr->incl_len;
             offset += sizeof(PcapPacketHeader);
@@ -91,7 +92,7 @@ public:
     }
 
 private:
-    void parse_mold_payload(const uint8_t* payload, size_t len, ParserStats& stats, OrderBook* book) {
+    inline void parse_mold_payload(const uint8_t* payload, size_t len, ParserStats& stats, OrderBook* book) {
         if (len < sizeof(MoldUDP64Header)) {
             parse_raw_itch_stream(payload, len, stats, book);
             return;
@@ -101,9 +102,7 @@ private:
         uint16_t msg_count = bswap16(mold->message_count);
         size_t mold_offset = sizeof(MoldUDP64Header);
 
-        if (msg_count == 0xFFFF) {
-            return;
-        }
+        if (msg_count == 0xFFFF) return;
 
         for (uint16_t i = 0; i < msg_count && mold_offset + sizeof(MoldUDP64MessageBlock) <= len; ++i) {
             auto block = reinterpret_cast<const MoldUDP64MessageBlock*>(payload + mold_offset);
@@ -113,8 +112,11 @@ private:
             if (mold_offset + msg_len > len) break;
 
             const uint8_t* msg_bytes = payload + mold_offset;
-            dispatch_itch_message(msg_bytes, msg_len, stats, book);
+            if (i + 1 < msg_count && mold_offset + msg_len < len) {
+                __builtin_prefetch(payload + mold_offset + msg_len, 0, 0);
+            }
 
+            dispatch_itch_message(msg_bytes, msg_len, stats, book);
             mold_offset += msg_len;
         }
     }
@@ -132,13 +134,13 @@ private:
     }
 
     inline void dispatch_itch_message(const uint8_t* msg_bytes, size_t msg_len, ParserStats& stats, OrderBook* book) {
-        if (msg_len == 0) return;
+        if (__builtin_expect(msg_len == 0, 0)) return;
         stats.itch_messages++;
         uint8_t type = msg_bytes[0];
 
         switch (type) {
             case 'A': {
-                if (msg_len < sizeof(ItchAddOrder)) return;
+                if (__builtin_expect(msg_len < sizeof(ItchAddOrder), 0)) return;
                 stats.add_orders++;
                 if (book) {
                     auto m = reinterpret_cast<const ItchAddOrder*>(msg_bytes);
@@ -150,7 +152,7 @@ private:
                 break;
             }
             case 'F': {
-                if (msg_len < sizeof(ItchAddOrderMPID)) return;
+                if (__builtin_expect(msg_len < sizeof(ItchAddOrderMPID), 0)) return;
                 stats.add_orders++;
                 if (book) {
                     auto m = reinterpret_cast<const ItchAddOrderMPID*>(msg_bytes);
@@ -162,7 +164,7 @@ private:
                 break;
             }
             case 'E': {
-                if (msg_len < sizeof(ItchOrderExecuted)) return;
+                if (__builtin_expect(msg_len < sizeof(ItchOrderExecuted), 0)) return;
                 stats.executed_orders++;
                 if (book) {
                     auto m = reinterpret_cast<const ItchOrderExecuted*>(msg_bytes);
@@ -173,7 +175,7 @@ private:
                 break;
             }
             case 'C': {
-                if (msg_len < sizeof(ItchOrderExecutedWithPrice)) return;
+                if (__builtin_expect(msg_len < sizeof(ItchOrderExecutedWithPrice), 0)) return;
                 stats.executed_orders++;
                 if (book) {
                     auto m = reinterpret_cast<const ItchOrderExecutedWithPrice*>(msg_bytes);
@@ -184,7 +186,7 @@ private:
                 break;
             }
             case 'X': {
-                if (msg_len < sizeof(ItchOrderCancel)) return;
+                if (__builtin_expect(msg_len < sizeof(ItchOrderCancel), 0)) return;
                 stats.canceled_orders++;
                 if (book) {
                     auto m = reinterpret_cast<const ItchOrderCancel*>(msg_bytes);
@@ -195,7 +197,7 @@ private:
                 break;
             }
             case 'D': {
-                if (msg_len < sizeof(ItchOrderDelete)) return;
+                if (__builtin_expect(msg_len < sizeof(ItchOrderDelete), 0)) return;
                 stats.deleted_orders++;
                 if (book) {
                     auto m = reinterpret_cast<const ItchOrderDelete*>(msg_bytes);
@@ -205,7 +207,7 @@ private:
                 break;
             }
             case 'U': {
-                if (msg_len < sizeof(ItchOrderReplace)) return;
+                if (__builtin_expect(msg_len < sizeof(ItchOrderReplace), 0)) return;
                 stats.replaced_orders++;
                 if (book) {
                     auto m = reinterpret_cast<const ItchOrderReplace*>(msg_bytes);
