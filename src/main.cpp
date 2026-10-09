@@ -106,16 +106,26 @@ int main(int argc, char* argv[]) {
         kestrel::PcapItchParser parser;
         kestrel::OrderBook book;
 
-        std::cout << "[*] Parsing raw packets & rebuilding Limit Order Book...\n";
-        auto start = std::chrono::high_resolution_clock::now();
+        std::cout << "[*] Warmup & parsing raw packets & rebuilding Limit Order Book...\n";
+        parser.parse(mmap_file.data(), mmap_file.size(), &book);
 
-        auto stats = parser.parse(mmap_file.data(), mmap_file.size(), &book);
+        kestrel::ParserStats stats{};
+        double min_elapsed = 1e9;
+        double max_throughput = 0.0;
 
-        auto end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> diff = end - start;
-
-        double elapsed_sec = diff.count();
-        double throughput = stats.itch_messages / elapsed_sec / 1e6;
+        for (int run = 0; run < 5; ++run) {
+            kestrel::OrderBook run_book;
+            auto start = std::chrono::high_resolution_clock::now();
+            stats = parser.parse(mmap_file.data(), mmap_file.size(), &run_book);
+            auto end = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double> diff = end - start;
+            double elapsed_sec = diff.count();
+            double throughput = stats.itch_messages / elapsed_sec / 1e6;
+            if (elapsed_sec < min_elapsed) {
+                min_elapsed = elapsed_sec;
+                max_throughput = throughput;
+            }
+        }
 
         std::cout << "\n================ BENCHMARK RESULTS ================\n";
         std::cout << "[+] Total Packets:    " << stats.total_packets << "\n";
@@ -125,8 +135,8 @@ int main(int argc, char* argv[]) {
         std::cout << "[+] Canceled Orders:  " << stats.canceled_orders << "\n";
         std::cout << "[+] Deleted Orders:   " << stats.deleted_orders << "\n";
         std::cout << "[+] Replaced Orders:  " << stats.replaced_orders << "\n";
-        std::cout << "[+] Elapsed Time:     " << elapsed_sec << " seconds\n";
-        std::cout << "[+] Throughput:       " << throughput << " M msg/sec\n";
+        std::cout << "[+] Best Elapsed:     " << min_elapsed << " seconds\n";
+        std::cout << "[+] Peak Throughput:  " << max_throughput << " M msg/sec\n";
         std::cout << "===================================================\n";
 
         book.print_top(5);

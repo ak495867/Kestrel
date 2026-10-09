@@ -116,6 +116,9 @@ public:
 #ifdef POSIX_MADV_SEQUENTIAL
         posix_madvise(mapped, size_, POSIX_MADV_SEQUENTIAL);
 #endif
+#ifdef MADV_HUGEPAGE
+        madvise(mapped, size_, MADV_HUGEPAGE);
+#endif
 #endif
     }
 

@@ -34,10 +34,14 @@ public:
         if (__builtin_expect(tick < max_price_ticks_, 1)) {
             if (side == 'B') {
                 bid_levels_[tick] += shares;
-                best_bid_tick_ = (tick > best_bid_tick_) ? tick : best_bid_tick_;
+                if (tick > best_bid_tick_) [[unlikely]] {
+                    best_bid_tick_ = tick;
+                }
             } else {
                 ask_levels_[tick] += shares;
-                best_ask_tick_ = (tick < best_ask_tick_) ? tick : best_ask_tick_;
+                if (tick < best_ask_tick_) [[unlikely]] {
+                    best_ask_tick_ = tick;
+                }
             }
         }
     }

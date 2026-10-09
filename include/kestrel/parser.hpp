@@ -143,7 +143,7 @@ private:
                 if (__builtin_expect(msg_len < sizeof(ItchAddOrder), 0)) return;
                 stats.add_orders++;
                 if (book) {
-                    auto res = parse_add_order_simd(msg_bytes);
+                    auto res = parse_add_order_fast(msg_bytes);
                     book->add_order(res.order_id, res.side, res.shares, res.price);
                 }
                 break;
