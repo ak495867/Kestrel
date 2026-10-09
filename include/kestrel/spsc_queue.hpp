@@ -60,6 +60,40 @@ public:
         return true;
     }
 
+    size_t push_batch(const T* items, size_t count) noexcept {
+        const size_t current_tail = tail_.load(std::memory_order_relaxed);
+        size_t available = Capacity - (current_tail - cached_head_);
+        if (available < count) {
+            cached_head_ = head_.load(std::memory_order_acquire);
+            available = Capacity - (current_tail - cached_head_);
+            if (available == 0) return 0;
+        }
+
+        size_t to_write = (count < available) ? count : available;
+        for (size_t i = 0; i < to_write; ++i) {
+            buffer_[(current_tail + i) & MASK] = items[i];
+        }
+        tail_.store(current_tail + to_write, std::memory_order_release);
+        return to_write;
+    }
+
+    size_t pop_batch(T* items, size_t max_count) noexcept {
+        const size_t current_head = head_.load(std::memory_order_relaxed);
+        size_t available = cached_tail_ - current_head;
+        if (available == 0) {
+            cached_tail_ = tail_.load(std::memory_order_acquire);
+            available = cached_tail_ - current_head;
+            if (available == 0) return 0;
+        }
+
+        size_t to_read = (max_count < available) ? max_count : available;
+        for (size_t i = 0; i < to_read; ++i) {
+            items[i] = buffer_[(current_head + i) & MASK];
+        }
+        head_.store(current_head + to_read, std::memory_order_release);
+        return to_read;
+    }
+
     [[nodiscard]] bool empty() const noexcept {
         return head_.load(std::memory_order_relaxed) == tail_.load(std::memory_order_relaxed);
     }

@@ -7,14 +7,9 @@
 #include <string>
 #include <algorithm>
 #include <cstring>
+#include <immintrin.h>
 
 namespace kestrel {
-
-struct BookOrder {
-    uint32_t shares{0};
-    uint32_t price{0};
-    char side{0};
-};
 
 class OrderBook {
 public:
@@ -26,7 +21,8 @@ public:
 
     OrderBook() {
         keys_.assign(MAP_CAPACITY, EMPTY_KEY);
-        values_.resize(MAP_CAPACITY);
+        shares_.resize(MAP_CAPACITY);
+        prices_.resize(MAP_CAPACITY);
         bid_levels_.assign(500000, 0);
         ask_levels_.assign(500000, 0);
         bid_bitmap_.assign(NUM_BUCKETS, 0);
@@ -34,21 +30,24 @@ public:
     }
 
     inline void add_order(uint64_t order_id, char side, uint32_t shares, uint32_t price) noexcept {
-        size_t idx = hash_oid(order_id);
+        size_t idx = (order_id ^ (order_id >> 16)) & MAP_MASK;
         size_t first_deleted = MAP_CAPACITY;
+        uint32_t packed_price = (price & 0x7FFFFFFF) | (static_cast<uint32_t>(side == 'B') << 31);
 
         while (true) {
             uint64_t k = keys_[idx];
             if (k == EMPTY_KEY) {
                 if (first_deleted != MAP_CAPACITY) idx = first_deleted;
                 keys_[idx] = order_id;
-                values_[idx] = {shares, price, side};
+                shares_[idx] = shares;
+                prices_[idx] = packed_price;
                 active_orders_++;
                 break;
             } else if (k == DELETED_KEY) {
                 if (first_deleted == MAP_CAPACITY) first_deleted = idx;
             } else if (k == order_id) {
-                values_[idx] = {shares, price, side};
+                shares_[idx] = shares;
+                prices_[idx] = packed_price;
                 break;
             }
             idx = (idx + 1) & MAP_MASK;
@@ -69,21 +68,21 @@ public:
     }
 
     inline void execute_order(uint64_t order_id, uint32_t shares) noexcept {
-        size_t idx = hash_oid(order_id);
+        size_t idx = (order_id ^ (order_id >> 16)) & MAP_MASK;
         while (true) {
             uint64_t k = keys_[idx];
             if (k == EMPTY_KEY) return;
             if (k == order_id) {
-                auto& ord = values_[idx];
-                uint32_t tick = ord.price / 100;
-                if (ord.shares <= shares) {
-                    reduce_level(ord.side, tick, ord.shares);
+                uint32_t raw_price = prices_[idx];
+                char side = (raw_price >> 31) ? 'B' : 'S';
+                uint32_t tick = (raw_price & 0x7FFFFFFF) / 100;
+                if (shares_[idx] <= shares) {
+                    reduce_level(side, tick, shares_[idx]);
                     keys_[idx] = DELETED_KEY;
-                    ord.side = 0;
                     active_orders_--;
                 } else {
-                    ord.shares -= shares;
-                    reduce_level(ord.side, tick, shares);
+                    shares_[idx] -= shares;
+                    reduce_level(side, tick, shares);
                 }
                 return;
             }
@@ -96,16 +95,16 @@ public:
     }
 
     inline void delete_order(uint64_t order_id) noexcept {
-        size_t idx = hash_oid(order_id);
+        size_t idx = (order_id ^ (order_id >> 16)) & MAP_MASK;
         while (true) {
             uint64_t k = keys_[idx];
             if (k == EMPTY_KEY) return;
             if (k == order_id) {
-                auto& ord = values_[idx];
-                uint32_t tick = ord.price / 100;
-                reduce_level(ord.side, tick, ord.shares);
+                uint32_t raw_price = prices_[idx];
+                char side = (raw_price >> 31) ? 'B' : 'S';
+                uint32_t tick = (raw_price & 0x7FFFFFFF) / 100;
+                reduce_level(side, tick, shares_[idx]);
                 keys_[idx] = DELETED_KEY;
-                ord.side = 0;
                 active_orders_--;
                 return;
             }
@@ -114,15 +113,15 @@ public:
     }
 
     inline void replace_order(uint64_t old_order_id, uint64_t new_order_id, uint32_t new_shares, uint32_t new_price) noexcept {
-        size_t idx = hash_oid(old_order_id);
+        size_t idx = (old_order_id ^ (old_order_id >> 16)) & MAP_MASK;
         while (true) {
             uint64_t k = keys_[idx];
             if (k == EMPTY_KEY) return;
             if (k == old_order_id) {
-                auto ord = values_[idx];
-                char side = ord.side;
-                uint32_t old_tick = ord.price / 100;
-                reduce_level(side, old_tick, ord.shares);
+                uint32_t raw_price = prices_[idx];
+                char side = (raw_price >> 31) ? 'B' : 'S';
+                uint32_t old_tick = (raw_price & 0x7FFFFFFF) / 100;
+                reduce_level(side, old_tick, shares_[idx]);
                 keys_[idx] = DELETED_KEY;
                 active_orders_--;
                 add_order(new_order_id, side, new_shares, new_price);
@@ -201,15 +200,6 @@ public:
     }
 
 private:
-    static inline size_t hash_oid(uint64_t x) noexcept {
-        x ^= x >> 33;
-        x *= 0xff51afd7ed558ccdULL;
-        x ^= x >> 33;
-        x *= 0xc4ceb9fe1a85ec53ULL;
-        x ^= x >> 33;
-        return x & MAP_MASK;
-    }
-
     inline void reduce_level(char side, uint32_t tick, uint32_t shares) noexcept {
         if (__builtin_expect(tick >= 500000, 0)) return;
         if (side == 'B') {
@@ -236,7 +226,8 @@ private:
     uint32_t best_ask_tick_{0xFFFFFFFF};
 
     std::vector<uint64_t> keys_;
-    std::vector<BookOrder> values_;
+    std::vector<uint32_t> shares_;
+    std::vector<uint32_t> prices_;
     std::vector<uint64_t> bid_levels_;
     std::vector<uint64_t> ask_levels_;
     std::vector<uint64_t> bid_bitmap_;

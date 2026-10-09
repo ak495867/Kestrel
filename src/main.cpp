@@ -157,23 +157,33 @@ int main(int argc, char* argv[]) {
 
         std::thread consumer([&]() {
             kestrel::set_current_thread_affinity(4);
-            QueueOrderEvent evt{};
+            constexpr size_t BATCH_SIZE = 64;
+            QueueOrderEvent batch[BATCH_SIZE];
             uint64_t total = 0;
             double local_vwap_sum = 0.0;
             uint64_t local_volume = 0;
+            bool done = false;
 
-            while (true) {
-                if (queue->pop(evt)) {
-                    if (evt.is_sentinel) break;
-                    if (__builtin_expect(total == 0, 0)) {
-                        consumer_start = std::chrono::high_resolution_clock::now();
-                    }
-                    consumer_book.add_order(evt.order_id, evt.side, evt.shares, evt.price);
-                    local_vwap_sum += static_cast<double>(evt.price) * evt.shares;
-                    local_volume += evt.shares;
-                    total++;
-                } else {
+            while (!done) {
+                size_t n = queue->pop_batch(batch, BATCH_SIZE);
+                if (n == 0) {
                     _mm_pause();
+                    continue;
+                }
+
+                if (__builtin_expect(total == 0, 0)) {
+                    consumer_start = std::chrono::high_resolution_clock::now();
+                }
+
+                for (size_t i = 0; i < n; ++i) {
+                    if (batch[i].is_sentinel) {
+                        done = true;
+                        break;
+                    }
+                    consumer_book.add_order(batch[i].order_id, batch[i].side, batch[i].shares, batch[i].price);
+                    local_vwap_sum += static_cast<double>(batch[i].price) * batch[i].shares;
+                    local_volume += batch[i].shares;
+                    total++;
                 }
             }
             consumer_end = std::chrono::high_resolution_clock::now();
@@ -187,6 +197,10 @@ int main(int argc, char* argv[]) {
             const uint8_t* data = mmap_file.data();
             size_t file_size = mmap_file.size();
             size_t offset = sizeof(kestrel::PcapFileHeader);
+
+            constexpr size_t PROD_BATCH = 64;
+            QueueOrderEvent prod_events[PROD_BATCH];
+            size_t prod_count = 0;
 
             while (offset + sizeof(kestrel::PcapPacketHeader) <= file_size) {
                 auto pkt_hdr = reinterpret_cast<const kestrel::PcapPacketHeader*>(data + offset);
@@ -206,15 +220,30 @@ int main(int argc, char* argv[]) {
                     auto m = reinterpret_cast<const kestrel::ItchAddOrder*>(msg_bytes);
                     uint16_t locate = kestrel::bswap16(m->stock_locate);
 
-                    QueueOrderEvent evt{res.order_id, res.shares, res.price, locate, res.side, false};
-                    while (!queue->push(evt)) {
-                        _mm_pause();
+                    prod_events[prod_count++] = {res.order_id, res.shares, res.price, locate, res.side, false};
+                    if (prod_count == PROD_BATCH) {
+                        size_t pushed = 0;
+                        while (pushed < PROD_BATCH) {
+                            size_t res_push = queue->push_batch(prod_events + pushed, PROD_BATCH - pushed);
+                            pushed += res_push;
+                            if (res_push == 0) _mm_pause();
+                        }
+                        prod_count = 0;
                     }
 
                     mold_offset += sizeof(kestrel::ItchAddOrder);
                 }
 
                 offset += incl_len;
+            }
+
+            if (prod_count > 0) {
+                size_t pushed = 0;
+                while (pushed < prod_count) {
+                    size_t res_push = queue->push_batch(prod_events + pushed, prod_count - pushed);
+                    pushed += res_push;
+                    if (res_push == 0) _mm_pause();
+                }
             }
 
             QueueOrderEvent sentinel{0, 0, 0, 0, 0, true};
