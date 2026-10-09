@@ -3,8 +3,9 @@
 [![Language](https://img.shields.io/badge/Language-C%2B%2B20-00599C?style=flat-square&logo=c%2B%2B)](https://en.cppreference.com/w/cpp/20)
 [![Hardware](https://img.shields.io/badge/Hardware-SystemVerilog%20%2F%20AXI4--Stream-orange?style=flat-square)]()
 [![Kernel-Bypass](https://img.shields.io/badge/Kernel--Bypass-PCIe%20DMA%20UIO-red?style=flat-square)]()
-[![Single-Thread](https://img.shields.io/badge/Single--Thread%20Peak-168.6M%20msg%2Fsec-brightgreen?style=flat-square)]()
-[![SPSC Cross-Core](https://img.shields.io/badge/SPSC%20Cross--Core-97.6M%20msg%2Fsec-blue?style=flat-square)]()
+[![Parser-Only](https://img.shields.io/badge/Parser--Only-134.4M%20msg%2Fsec-brightgreen?style=flat-square)]()
+[![Single-Thread](https://img.shields.io/badge/Single--Thread%20LOB-141.9M%20msg%2Fsec-brightgreen?style=flat-square)]()
+[![SPSC Cross-Core](https://img.shields.io/badge/SPSC%20Cross--Core-98.8M%20msg%2Fsec-blue?style=flat-square)]()
 
 An ultra-low latency, zero-copy, memory-mapped NASDAQ TotalView-ITCH 5.0 order book engine, PCAP parser, synthesizable SystemVerilog FPGA parser core, and dedicated Linux PCIe kernel-bypass driver. Built to bypass OS network stack overhead, eliminate CPU cache thrashing, and process raw market streams at wire speed.
 
@@ -14,22 +15,28 @@ An ultra-low latency, zero-copy, memory-mapped NASDAQ TotalView-ITCH 5.0 order b
 
 Measured on raw multi-gigabit PCAP packet streams with live Limit Order Book state reconstruction, multi-asset locate demuxing, transport gap verification, and online signal tracking:
 
-| Mode | Throughput | Latency / Msg | Execution Details |
+| Benchmark Mode | Throughput | Latency / Msg | Execution Details |
 | :--- | :--- | :--- | :--- |
-| **Single-Threaded Apex** | **168.59 M msg/sec** | **~5.93 ns** | In-place zero-copy parsing + SoA flat hash table + bitmap BBO |
-| **Two-Thread SPSC Pipeline** | **97.61 M msg/sec** | **~10.25 ns** | Core-pinned batched producer-consumer ring buffer + online VWAP |
-| **Kernel-Bypass DMA Ingestion** | **61.17 M desc/sec** | **~16.35 ns** | Zero-copy PCIe circular ring descriptor polling + book update |
+| **Mode 1A: Parser-Only Wire Streaming** | **134.45 M msg/sec** | **~7.44 ns** | Zero-copy header stripping + MOVBE endian swap (no book allocation) |
+| **Mode 1B: Single-Thread End-to-End** | **141.86 M msg/sec** | **~7.05 ns** | In-place zero-copy parsing + SoA flat hash table + bitmapped BBO |
+| **Mode 2: Two-Thread SPSC Pipeline** | **98.77 M msg/sec** | **~10.12 ns** | Core-pinned batched producer-consumer ring buffer + online VWAP |
+| **Mode 3: Kernel-Bypass DMA Ingestion** | **61.17 M desc/sec** | **~16.35 ns** | Zero-copy PCIe circular ring descriptor polling + book update |
 
 ```text
-=== [MODE 1] SINGLE-THREADED APEX BENCHMARK ===
-[+] Single-Threaded Best Time:       0.0118631 s
-[+] Single-Threaded Peak Throughput: 168.59 M msg/sec
+=== [MODE 1A] PARSER-ONLY WIRE STREAMING (NO BOOK ALLOCATION) ===
+[+] Parser-Only Peak Throughput:     134.447 M msg/sec
+[+] Parser-Only Latency:             7.43785 ns/msg
+
+=== [MODE 1B] END-TO-END SINGLE-THREADED RECONSTRUCTION (PARSER + LOB) ===
+[+] Single-Threaded Best Time:       0.0140986 s
+[+] Single-Threaded Peak Throughput: 141.858 M msg/sec
+[+] End-to-End Latency:              7.0493 ns/msg
 [+] Sequence Gaps Detected:          0
 
 === [MODE 2] TWO-THREAD SPSC PIPELINE (PARSER -> ALPHA ENGINE) ===
 [+] SPSC Messages Processed:        2000000
-[+] SPSC Pipeline Elapsed:          0.0204906 s
-[+] SPSC Cross-Core Throughput:     97.6057 M msg/sec
+[+] SPSC Pipeline Elapsed:          0.0202481 s
+[+] SPSC Cross-Core Throughput:     98.7747 M msg/sec
 [+] Consumer Real-Time VWAP Metric: 180.03
 
 === [MODE 3] CUSTOM KERNEL-BYPASS DMA INGESTION ===
@@ -37,6 +44,20 @@ Measured on raw multi-gigabit PCAP packet streams with live Limit Order Book sta
 [+] Ingestion Elapsed:                0.0163476 s
 [+] Kernel-Bypass Ingestion Rate:     61.1711 M desc/sec
 ```
+
+---
+
+## Correctness & Verification Suite
+
+1. **Hardware AXI4-Stream FSM Handshake Verification (`hardware/tb_itch_parser_fsm.sv`):**
+   - Asserts continuous `m_order_valid` persistence under consumer backpressure (`m_order_ready == 0`).
+   - Verifies zero output loss during downstream pipeline stalls across clock cycles.
+2. **Order Book Invariant & BBO Unit Tests (`src/test_order_book.cpp`):**
+   - Validates accounting invariants on duplicate `order_id` insertion, level deductions, and side reversals.
+   - Tests best-bid and best-ask ladder invalidation across insertions, partial cancels, full executions, and deletions.
+3. **Differential Randomized Testing (`src/test_differential.cpp`):**
+   - 200,000 randomized operations executed concurrently against a trusted `std::unordered_map` and `std::map` red-black tree reference book.
+   - Asserts identical order count, level volumes, and BBO prices across every operation step.
 
 ---
 
@@ -59,7 +80,7 @@ flowchart TD
     end
 
     subgraph HARDWARE["FPGA Offload & Kernel Bypass"]
-        J["10GbE MAC (AXI4-Stream 64-bit)"] --> K["itch_parser_fsm.sv"]
+        J["10GbE MAC (AXI4-Stream 64-bit)"] --> K["itch_parser_fsm.sv (Backpressure-Safe)"]
         K --> L["Zero-Cycle Endian Permutation Wires"]
         L --> M["PCIe DMA Engine -> Physical Host Memory"]
         M --> N["kestrel_uio Kernel Driver (dma_alloc_coherent)"]
@@ -97,7 +118,7 @@ sequenceDiagram
 Order tracking uses a flat Structure-of-Arrays (SoA) open-addressed hash map separating 64-bit keys from quantities and packed prices:
 - Linear probe loops scan pure 64-bit integer vectors (`8 bytes` per slot), fitting 8 candidate keys per 64-byte L1 cacheline.
 - Folded single-cycle hashing `(order_id ^ (order_id >> 16)) & MASK` eliminates integer division and multi-cycle arithmetic stalls.
-- Deleted entries are marked with tombstones and reclaimed dynamically on subsequent insertions.
+- Duplicate order IDs immediately decrement the old price-level volume before applying replacements, preserving volume accounting invariants.
 
 ### 2. $O(1)$ Bitmapped BBO Tracking
 - Price levels are mirrored across 64-bit bitmasks (`bid_bitmap_`, `ask_bitmap_`).
@@ -130,7 +151,7 @@ Prevents multi-gigabyte PCAP packet streaming from thrashing CPU L2/L3 caches:
 Includes a synthesizable line-rate hardware parser FSM targeting 10GbE / 25GbE FPGA SmartNIC MAC interfaces:
 - Ingests 64-bit AXI4-Stream flits clocked at 322.26 MHz.
 - Real-time hardware header stripping across Ethernet, IPv4, UDP, and MoldUDP64.
-- Zero-cycle endianness transformation using physical wire routing.
+- Backpressure-safe AXI4-Stream handshake: holds `m_order_valid` asserted continuously until `m_order_ready` acknowledgement.
 - Validated testbench provided in `hardware/tb_itch_parser_fsm.sv`.
 
 ---
@@ -152,14 +173,16 @@ Kestrel/
 │       ├── pcap.hpp            # Packed PCAP, Ethernet, IPv4, UDP framing
 │       └── spsc_queue.hpp      # Batched cacheline-padded lock-free ring buffer
 ├── src/
-│   ├── main.cpp                # Dual-mode benchmark harness
-│   └── test_bypass.cpp         # Kernel-bypass DMA ingestion test harness
+│   ├── main.cpp                # Dual-mode benchmark harness (Parser-only & End-to-end)
+│   ├── test_bypass.cpp         # Kernel-bypass DMA ingestion test harness
+│   ├── test_differential.cpp   # Differential verification against map/unordered_map
+│   └── test_order_book.cpp     # Targeted BBO and duplicate ID invariant unit tests
 ├── hardware/
 │   ├── driver/
 │   │   ├── Makefile            # Linux kernel module build script
 │   │   └── kestrel_uio.c       # Linux zero-copy PCIe DMA driver module
-│   ├── itch_parser_fsm.sv      # Synthesizable AXI4-Stream ITCH parser FSM
-│   └── tb_itch_parser_fsm.sv   # SystemVerilog testbench harness
+│   ├── itch_parser_fsm.sv      # Backpressure-safe AXI4-Stream ITCH parser FSM
+│   └── tb_itch_parser_fsm.sv   # SystemVerilog testbench with backpressure assertions
 ├── CMakeLists.txt              # C++20, -O3, -flto, -mavx2 build pipeline
 └── README.md
 ```
@@ -181,11 +204,17 @@ cmake --build build --config Release
 
 ### Execution
 ```bash
-# Run full benchmark harness on generated/cached dataset
+# Run full benchmark harness (Parser-only + End-to-End single-thread + SPSC pipeline)
 ./build/kestrel_bench
 
 # Or run against an external recorded NASDAQ ITCH PCAP file
 ./build/kestrel_bench /path/to/capture.pcap
+
+# Run targeted order-book BBO invariant tests
+./build/kestrel_ob_test
+
+# Run differential randomized test suite (200k operations vs reference model)
+./build/kestrel_differential_test
 
 # Run kernel-bypass DMA ingestion benchmark
 ./build/kestrel_bypass_test

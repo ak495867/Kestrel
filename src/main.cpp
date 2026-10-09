@@ -103,20 +103,43 @@ struct QueueOrderEvent {
 
 int main(int argc, char* argv[]) {
     std::string pcap_path = "sample_nasdaq.pcap";
+    bool is_custom_pcap = false;
 
     if (argc > 1) {
         pcap_path = argv[1];
+        is_custom_pcap = true;
     } else {
         std::cout << "[*] Generating synthetic NASDAQ ITCH PCAP (2,000,000 messages)...\n";
         generate_synthetic_pcap(pcap_path, 2000000);
     }
 
     try {
-        std::cout << "[*] Memory-mapping file: " << pcap_path << "\n";
+        std::cout << "[*] Memory-mapping file: " << pcap_path << " (" << (is_custom_pcap ? "Real Exchange Capture" : "Synthetic Benchmark Stream") << ")\n";
         kestrel::MemoryMappedFile mmap_file(pcap_path);
         std::cout << "[+] Successfully mapped " << mmap_file.size() << " bytes.\n";
 
-        std::cout << "\n=== [MODE 1] SINGLE-THREADED APEX BENCHMARK ===\n";
+        std::cout << "\n=== [MODE 1A] PARSER-ONLY WIRE STREAMING (NO BOOK ALLOCATION) ===\n";
+        kestrel::PcapItchParser parser_only;
+        double min_parser_elapsed = 1e9;
+        double max_parser_throughput = 0.0;
+        kestrel::ParserStats parser_stats{};
+
+        for (int run = 0; run < 5; ++run) {
+            auto start = std::chrono::high_resolution_clock::now();
+            parser_stats = parser_only.parse(mmap_file.data(), mmap_file.size(), nullptr);
+            auto end = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double> diff = end - start;
+            double elapsed_sec = diff.count();
+            double throughput = parser_stats.itch_messages / elapsed_sec / 1e6;
+            if (elapsed_sec < min_parser_elapsed) {
+                min_parser_elapsed = elapsed_sec;
+                max_parser_throughput = throughput;
+            }
+        }
+        std::cout << "[+] Parser-Only Peak Throughput:     " << max_parser_throughput << " M msg/sec\n";
+        std::cout << "[+] Parser-Only Latency:             " << (min_parser_elapsed / parser_stats.itch_messages * 1e9) << " ns/msg\n";
+
+        std::cout << "\n=== [MODE 1B] END-TO-END SINGLE-THREADED RECONSTRUCTION (PARSER + LOB) ===\n";
         kestrel::PcapItchParser parser;
         kestrel::OrderBook warm_book;
         parser.parse(mmap_file.data(), mmap_file.size(), &warm_book);
@@ -141,6 +164,7 @@ int main(int argc, char* argv[]) {
 
         std::cout << "[+] Single-Threaded Best Time:       " << min_elapsed << " s\n";
         std::cout << "[+] Single-Threaded Peak Throughput: " << max_throughput << " M msg/sec\n";
+        std::cout << "[+] End-to-End Latency:              " << (min_elapsed / stats.itch_messages * 1e9) << " ns/msg\n";
         std::cout << "[+] Sequence Gaps Detected:          " << stats.sequence_gaps << "\n";
 
         std::cout << "\n=== [MODE 2] TWO-THREAD SPSC PIPELINE (PARSER -> ALPHA ENGINE) ===\n";

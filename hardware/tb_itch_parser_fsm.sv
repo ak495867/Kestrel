@@ -44,7 +44,7 @@ module tb_itch_parser_fsm;
         s_axis_tkeep = 8'hFF;
         s_axis_tvalid = 0;
         s_axis_tlast = 0;
-        m_order_ready = 1;
+        m_order_ready = 0;
 
         #20;
         rst_n = 1;
@@ -72,11 +72,37 @@ module tb_itch_parser_fsm;
         @(posedge clk);
         s_axis_tdata  = 64'h000000004141504C;
         s_axis_tlast  = 1;
+
         @(posedge clk);
         s_axis_tvalid = 0;
         s_axis_tlast  = 0;
 
-        #50;
+        repeat (5) begin
+            @(posedge clk);
+            if (!m_order_valid) begin
+                $display("[-] Assertion Failed: m_order_valid dropped under backpressure");
+                $fatal(1);
+            end
+        end
+
+        m_order_ready = 1;
+        @(posedge clk);
+
+        if (m_order_id != 64'h0123456789ABCDEF) begin
+            $display("[-] Order ID mismatch: %h", m_order_id);
+            $fatal(1);
+        end
+        if (m_side != 8'h42) begin
+            $display("[-] Side mismatch: %h", m_side);
+            $fatal(1);
+        end
+        if (m_shares != 32'd100) begin
+            $display("[-] Shares mismatch: %d", m_shares);
+            $fatal(1);
+        end
+
+        $display("[+] Hardware FSM backpressure handshake and parser verification PASSED");
+        #20;
         $finish;
     end
 

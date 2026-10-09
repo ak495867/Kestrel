@@ -25,3 +25,7 @@ add_executable(kestrel_bypass_test
 add_executable(kestrel_ob_test
     src/test_order_book.cpp
 )
+
+add_executable(kestrel_differential_test
+    src/test_differential.cpp
+)

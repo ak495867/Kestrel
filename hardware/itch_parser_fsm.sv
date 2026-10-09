@@ -72,9 +72,23 @@ module itch_parser_fsm (
         shares_next      = shares_reg;
         price_next       = price_reg;
         side_next        = side_reg;
-        order_valid_next = 1'b0;
+        order_valid_next = order_valid_reg;
 
-        if (s_axis_tvalid && s_axis_tready) begin
+        if (order_valid_reg && m_order_ready) begin
+            order_valid_next = 1'b0;
+        end
+
+        if (state == ST_ITCH_MSG_4) begin
+            if (m_order_ready) begin
+                if (s_axis_tvalid) begin
+                    if (s_axis_tlast) begin
+                        state_next = ST_IDLE;
+                    end else begin
+                        state_next = ST_ITCH_MSG_0;
+                    end
+                end
+            end
+        end else if (s_axis_tvalid && s_axis_tready) begin
             case (state)
                 ST_IDLE: begin
                     state_next = ST_ETH_IP_1;
@@ -138,14 +152,6 @@ module itch_parser_fsm (
                     state_next = ST_ITCH_MSG_4;
                 end
 
-                ST_ITCH_MSG_4: begin
-                    if (s_axis_tlast) begin
-                        state_next = ST_IDLE;
-                    end else begin
-                        state_next = ST_ITCH_MSG_0;
-                    end
-                end
-
                 ST_DROP: begin
                     if (s_axis_tlast) begin
                         state_next = ST_IDLE;
@@ -155,7 +161,7 @@ module itch_parser_fsm (
                 default: state_next = ST_IDLE;
             endcase
 
-            if (s_axis_tlast && state != ST_ITCH_MSG_4 && state != ST_DROP) begin
+            if (s_axis_tlast && state != ST_ITCH_MSG_3 && state != ST_DROP) begin
                 state_next = ST_IDLE;
             end
         end
