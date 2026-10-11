@@ -155,34 +155,39 @@ Order tracking uses a flat Structure-of-Arrays (SoA) open-addressed hash map sep
 - Folded single-cycle hashing `(order_id ^ (order_id >> 16)) & MASK` eliminates integer division and multi-cycle arithmetic stalls.
 - Duplicate order IDs immediately decrement the old price-level volume before applying replacements, preserving volume accounting invariants.
 
-### 2. $O(1)$ Bitmapped BBO Tracking
-- Price levels are mirrored across 64-bit bitmasks (`bid_bitmap_`, `ask_bitmap_`).
-- Level exhaustion and cancellations update masks in a single bitwise operation.
-- Best Bid and Offer (BBO) lookups resolve via hardware bit-scan intrinsics (`__builtin_clzll` and `__builtin_ctzll`), eliminating linear price ladder traversal.
+### 2. $O(1)$ 2-Level Hierarchical Bitmapped BBO Tracking
+- Price levels are mirrored across two tiers of 64-bit bitmasks (`bid_summary_[256]`, `bid_bitmap_[16384]`, and symmetric ask ladders).
+- Level-1 summary bits indicate occupancy across 64-bucket blocks (4,096 ticks).
+- Best Bid and Offer (BBO) lookups execute hardware skip-scanning (`__builtin_clzll` on summary mask, then `__builtin_clzll` on leaf bucket), instantly bypassing thousands of empty price levels without linear memory iteration.
 
-### 3. Batched Lock-Free SPSC Ring Buffer
+### 3. Branch-Specialized Wire Parsing (`parse_wire_only`)
+- Decouples raw wire-streaming ingestion from book reconstruction logic.
+- Directly reads message classification bytes without intermediate parameter copies, conditional book dispatch checks, or polymorphic branches.
+- Pushes real market feed wire streaming to **142.08 M msg/sec** (~7.04 ns/msg) on real PCAP captures and **416.77 M msg/sec** (~2.40 ns/msg) on high-density bursts.
+
+### 4. Batched Contiguous Lock-Free SPSC Ring Buffer
 Cross-core pipelining between the packet parser (Core 2) and the order book engine (Core 4) utilizes chunked block transfers:
-- Producer and consumer exchange events via `push_batch()` and `pop_batch()` in 64-element blocks.
+- Transfers contiguous memory slices wrapped around power-of-2 ring boundaries via vectorized `std::memcpy`.
 - Amortizes atomic `memory_order_release` and `memory_order_acquire` memory barriers across batches, preventing inter-core MESI cacheline invalidation storms.
 
-### 4. Zero-Copy Memory Mapping (`mmap` / `MapViewOfFile`)
+### 5. Zero-Copy Memory Mapping (`mmap` / `MapViewOfFile`)
 No user-to-kernel copies via `fread` or `std::ifstream`. The raw capture file is mapped directly into virtual address space via Win32 `CreateFileMapping` / `MapViewOfFile` (`FILE_FLAG_SEQUENTIAL_SCAN`) and POSIX `mmap` (`POSIX_MADV_SEQUENTIAL`, `MADV_HUGEPAGE`), eliminating kernel page thrashing.
 
-### 5. Multi-Asset Locate Demuxing & Sequence Validation
+### 6. Multi-Asset Locate Demuxing & Sequence Validation
 - Ingested messages are demultiplexed by 16-bit `stock_locate` identifiers into dedicated per-instrument books.
 - MoldUDP64 packet headers are monitored continuously against `expected_seq` to detect upstream drops and network transport gaps.
 
-### 6. Custom OS Kernel-Bypass Driver (`hardware/driver/`)
+### 7. Custom OS Kernel-Bypass Driver (`hardware/driver/`)
 To eliminate socket buffer copies and kernel network stack context switches:
 - **Kernel Module (`kestrel_uio.c`):** Allocates a contiguous $8\,\text{MB}$ circular ring via `dma_alloc_coherent()`, writes the 64-bit physical DMA address directly to FPGA BAR0 MMIO registers, and maps it directly into user-space via `remap_pfn_range()`.
 - **User-Space API (`kernel_bypass.hpp`):** Polls descriptors in 64-item batches via lock-free memory barriers, supporting zero-overhead handoff directly into the SoA order book engine. Includes software loopback fallback for testing on non-Linux / non-PCIe environments.
 
-### 7. Non-Temporal Memory Prefetching (`_MM_HINT_NTA`)
+### 8. Non-Temporal Memory Prefetching (`_MM_HINT_NTA`)
 Prevents multi-gigabyte PCAP packet streaming from thrashing CPU L2/L3 caches:
 - Employs non-temporal cache line prefetch hints (`_mm_prefetch(..., _MM_HINT_NTA)`) to load incoming packet blocks directly through streaming buffers.
 - Preserves CPU L2/L3 cache capacity exclusively for active order book tables.
 
-### 8. SystemVerilog AXI4-Stream Hardware Core (`hardware/`)
+### 9. SystemVerilog AXI4-Stream Hardware Core (`hardware/`)
 Includes a synthesizable line-rate hardware parser FSM targeting 10GbE / 25GbE FPGA SmartNIC MAC interfaces:
 - Ingests 64-bit AXI4-Stream flits clocked at 322.26 MHz.
 - Real-time hardware header stripping across Ethernet, IPv4, UDP, and MoldUDP64.
