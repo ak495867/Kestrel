@@ -31,6 +31,14 @@ public:
     ~PcapItchParser() = default;
 
     ParserStats parse(const uint8_t* data, size_t file_size, OrderBook* default_book = nullptr) {
+        if (!default_book) {
+            return parse_wire_only(data, file_size);
+        }
+        return parse_with_book(data, file_size, *default_book);
+    }
+
+private:
+    ParserStats parse_wire_only(const uint8_t* data, size_t file_size) {
         ParserStats stats{};
         if (file_size < sizeof(PcapFileHeader)) return stats;
 
@@ -50,11 +58,78 @@ public:
             if (offset + incl_len > file_size) break;
             stats.total_packets++;
 
-            size_t pkt_offset = 0;
-            if (incl_len < sizeof(EthernetHeader)) {
-                offset += incl_len;
-                continue;
+            constexpr size_t FIXED_HDRS_LEN = sizeof(EthernetHeader) + sizeof(IPv4Header) + sizeof(UdpHeader);
+            if (__builtin_expect(incl_len >= FIXED_HDRS_LEN, 1)) {
+                auto ip = reinterpret_cast<const IPv4Header*>(data + offset + sizeof(EthernetHeader));
+                if (__builtin_expect(ip->version_ihl == 0x45 && ip->protocol == 17, 1)) {
+                    auto udp = reinterpret_cast<const UdpHeader*>(data + offset + sizeof(EthernetHeader) + sizeof(IPv4Header));
+                    uint16_t udp_len = bswap16(udp->length);
+                    if (__builtin_expect(udp_len >= sizeof(UdpHeader), 1)) {
+                        size_t payload_len = udp_len - sizeof(UdpHeader);
+                        if (FIXED_HDRS_LEN + payload_len > incl_len) {
+                            payload_len = incl_len - FIXED_HDRS_LEN;
+                        }
+                        const uint8_t* payload = data + offset + FIXED_HDRS_LEN;
+                        if (payload_len >= sizeof(MoldUDP64Header)) {
+                            auto mold = reinterpret_cast<const MoldUDP64Header*>(payload);
+                            uint64_t seq = bswap64(mold->sequence_number);
+                            uint16_t msg_count = bswap16(mold->message_count);
+                            size_t mold_offset = sizeof(MoldUDP64Header);
+
+                            if (msg_count != 0xFFFF) {
+                                if (expected_seq != 0 && seq != expected_seq) {
+                                    stats.sequence_gaps++;
+                                }
+                                expected_seq = seq + msg_count;
+
+                                for (uint16_t i = 0; i < msg_count && mold_offset + sizeof(MoldUDP64MessageBlock) <= payload_len; ++i) {
+                                    auto block = reinterpret_cast<const MoldUDP64MessageBlock*>(payload + mold_offset);
+                                    uint16_t msg_len = bswap16(block->message_length);
+                                    mold_offset += sizeof(MoldUDP64MessageBlock);
+                                    if (mold_offset + msg_len > payload_len) break;
+
+                                    stats.itch_messages++;
+                                    uint8_t type = payload[mold_offset];
+                                    if (type == 'A' || type == 'F') stats.add_orders++;
+                                    else if (type == 'E' || type == 'C') stats.executed_orders++;
+                                    else if (type == 'X') stats.canceled_orders++;
+                                    else if (type == 'D') stats.deleted_orders++;
+                                    else if (type == 'U') stats.replaced_orders++;
+                                    else stats.other_messages++;
+
+                                    mold_offset += msg_len;
+                                }
+                            }
+                        }
+                        offset += incl_len;
+                        continue;
+                    }
+                }
             }
+            offset += incl_len;
+        }
+        return stats;
+    }
+
+    ParserStats parse_with_book(const uint8_t* data, size_t file_size, OrderBook& book) {
+        ParserStats stats{};
+        if (file_size < sizeof(PcapFileHeader)) return stats;
+
+        auto pcap_hdr = reinterpret_cast<const PcapFileHeader*>(data);
+        bool swap_pcap = (pcap_hdr->magic_number == 0xd4c3b2a1);
+
+        size_t offset = sizeof(PcapFileHeader);
+        uint64_t expected_seq = 0;
+
+        while (offset + sizeof(PcapPacketHeader) <= file_size) {
+            _mm_prefetch(reinterpret_cast<const char*>(data + offset + 256), _MM_HINT_NTA);
+
+            auto pkt_hdr = reinterpret_cast<const PcapPacketHeader*>(data + offset);
+            uint32_t incl_len = swap_pcap ? bswap32(pkt_hdr->incl_len) : pkt_hdr->incl_len;
+            offset += sizeof(PcapPacketHeader);
+
+            if (offset + incl_len > file_size) break;
+            stats.total_packets++;
 
             constexpr size_t FIXED_HDRS_LEN = sizeof(EthernetHeader) + sizeof(IPv4Header) + sizeof(UdpHeader);
             if (__builtin_expect(incl_len >= FIXED_HDRS_LEN, 1)) {
@@ -68,13 +143,14 @@ public:
                             payload_len = incl_len - FIXED_HDRS_LEN;
                         }
                         const uint8_t* payload = data + offset + FIXED_HDRS_LEN;
-                        parse_mold_payload(payload, payload_len, stats, default_book, expected_seq);
+                        parse_mold_payload(payload, payload_len, stats, &book, expected_seq);
                         offset += incl_len;
                         continue;
                     }
                 }
             }
 
+            size_t pkt_offset = 0;
             auto eth = reinterpret_cast<const EthernetHeader*>(data + offset);
             pkt_offset += sizeof(EthernetHeader);
 
@@ -111,7 +187,7 @@ public:
             }
 
             const uint8_t* payload = data + offset + pkt_offset;
-            parse_mold_payload(payload, payload_len, stats, default_book, expected_seq);
+            parse_mold_payload(payload, payload_len, stats, &book, expected_seq);
 
             offset += incl_len;
         }

@@ -3,9 +3,9 @@
 [![Language](https://img.shields.io/badge/Language-C%2B%2B20-00599C?style=flat-square&logo=c%2B%2B)](https://en.cppreference.com/w/cpp/20)
 [![Hardware](https://img.shields.io/badge/Hardware-SystemVerilog%20%2F%20AXI4--Stream-orange?style=flat-square)]()
 [![Kernel-Bypass](https://img.shields.io/badge/Kernel--Bypass-PCIe%20DMA%20UIO-red?style=flat-square)]()
-[![Parser-Only](https://img.shields.io/badge/Parser--Only-387.9M%20msg%2Fsec-brightgreen?style=flat-square)]()
+[![Parser-Only](https://img.shields.io/badge/Parser--Only-416.8M%20msg%2Fsec-brightgreen?style=flat-square)]()
 [![Single-Thread](https://img.shields.io/badge/Single--Thread%20LOB-160.7M%20msg%2Fsec-brightgreen?style=flat-square)]()
-[![SPSC Cross-Core](https://img.shields.io/badge/SPSC%20Cross--Core-120.0M%20msg%2Fsec-blue?style=flat-square)]()
+[![SPSC Cross-Core](https://img.shields.io/badge/SPSC%20Cross--Core-121.9M%20msg%2Fsec-blue?style=flat-square)]()
 
 An ultra-low latency, zero-copy, memory-mapped NASDAQ TotalView-ITCH 5.0 order book engine, PCAP parser, synthesizable SystemVerilog FPGA parser core, and dedicated Linux PCIe kernel-bypass driver. Built to bypass OS network stack overhead, eliminate CPU cache thrashing, and process market streams at wire speed.
 
@@ -22,28 +22,28 @@ Tested on genuine NASDAQ TotalView-ITCH 5.0 market data (multiplexed multi-ticke
 
 | Benchmark Mode | Throughput | Latency / Msg | Workload & Test Harness |
 | :--- | :--- | :--- | :--- |
-| **Mode 1A: Parser-Only Wire Streaming** | **108.02 M msg/sec** | **~9.26 ns** | Real MoldUDP64/Ethernet capture, zero-copy stripping + byte-swapping |
-| **Mode 1B: Single-Thread End-to-End** | **53.75 M msg/sec** | **~18.60 ns** | Real exchange stream reconstructed into SoA Order Book + Bitmapped BBO |
-| **Mode 2: Two-Thread SPSC Pipeline** | **38.70 M msg/sec** | **~25.84 ns** | Producer/Consumer cross-core queue dispatching real Add Orders + online VWAP |
+| **Mode 1A: Parser-Only Wire Streaming** | **142.08 M msg/sec** | **~7.04 ns** | Real MoldUDP64/Ethernet capture, zero-copy branch-specialized stripping |
+| **Mode 1B: Single-Thread End-to-End** | **53.98 M msg/sec** | **~18.52 ns** | Real exchange stream reconstructed into SoA Order Book + Bitmapped BBO |
+| **Mode 2: Two-Thread SPSC Pipeline** | **38.77 M msg/sec** | **~25.79 ns** | Producer/Consumer cross-core queue dispatching real Add Orders + online VWAP |
 
 ```text
 [*] Memory-mapping file: real_nasdaq.pcap (Real Exchange Capture)
 [+] Successfully mapped 94813890 bytes.
 
 === [MODE 1A] PARSER-ONLY WIRE STREAMING (NO BOOK ALLOCATION) ===
-[+] Parser-Only Peak Throughput:     108.021 M msg/sec
-[+] Parser-Only Latency:             9.25748 ns/msg
+[+] Parser-Only Peak Throughput:     142.082 M msg/sec
+[+] Parser-Only Latency:             7.03818 ns/msg
 
 === [MODE 1B] END-TO-END SINGLE-THREADED RECONSTRUCTION (PARSER + LOB) ===
-[+] Single-Threaded Best Time:       0.0164819 s
-[+] Single-Threaded Peak Throughput: 53.7531 M msg/sec
-[+] End-to-End Latency:              18.6036 ns/msg
+[+] Single-Threaded Best Time:       0.0164122 s
+[+] Single-Threaded Peak Throughput: 53.9814 M msg/sec
+[+] End-to-End Latency:              18.5249 ns/msg
 [+] Sequence Gaps Detected:          0
 
 === [MODE 2] TWO-THREAD SPSC PIPELINE (PARSER -> ALPHA ENGINE) ===
 [+] SPSC Messages Processed:        261521
-[+] SPSC Pipeline Elapsed:          0.0067775 s
-[+] SPSC Cross-Core Throughput:     38.5866 M msg/sec
+[+] SPSC Pipeline Elapsed:          0.0067456 s
+[+] SPSC Cross-Core Throughput:     38.7691 M msg/sec
 [+] Consumer Real-Time VWAP Metric: 51.5833
 ```
 
@@ -52,26 +52,26 @@ Tested on dense single-symbol Add Order stream:
 
 | Benchmark Mode | Throughput | Latency / Msg | Workload & Test Harness |
 | :--- | :--- | :--- | :--- |
-| **Mode 1A: Parser-Only Wire Streaming** | **387.94 M msg/sec** | **~2.58 ns** | Zero-copy header stripping + MOVBE endian swap (no book allocation) |
-| **Mode 1B: Single-Thread End-to-End** | **160.74 M msg/sec** | **~6.22 ns** | In-place zero-copy parsing + SoA flat hash table + bitmapped BBO |
-| **Mode 2: Two-Thread SPSC Pipeline** | **120.04 M msg/sec** | **~8.33 ns** | Core-pinned batched producer-consumer ring buffer + online VWAP |
+| **Mode 1A: Parser-Only Wire Streaming** | **416.77 M msg/sec** | **~2.40 ns** | Zero-copy header stripping + MOVBE endian swap (no book allocation) |
+| **Mode 1B: Single-Thread End-to-End** | **152.89 M msg/sec** | **~6.54 ns** | In-place zero-copy parsing + SoA flat hash table + bitmapped BBO |
+| **Mode 2: Two-Thread SPSC Pipeline** | **121.89 M msg/sec** | **~8.20 ns** | Core-pinned batched producer-consumer ring buffer + online VWAP |
 | **Mode 3: Kernel-Bypass DMA Consumer** | **89.38 M desc/sec** | **~11.19 ns** | Decoupled cross-core PCIe ring buffer emulation + book update |
 
 ```text
 === [MODE 1A] PARSER-ONLY WIRE STREAMING (NO BOOK ALLOCATION) ===
-[+] Parser-Only Peak Throughput:     387.935 M msg/sec
-[+] Parser-Only Latency:             2.57775 ns/msg
+[+] Parser-Only Peak Throughput:     416.771 M msg/sec
+[+] Parser-Only Latency:             2.39940 ns/msg
 
 === [MODE 1B] END-TO-END SINGLE-THREADED RECONSTRUCTION (PARSER + LOB) ===
-[+] Single-Threaded Best Time:       0.0124427 s
-[+] Single-Threaded Peak Throughput: 160.737 M msg/sec
-[+] End-to-End Latency:              6.22135 ns/msg
+[+] Single-Threaded Best Time:       0.0130817 s
+[+] Single-Threaded Peak Throughput: 152.885 M msg/sec
+[+] End-to-End Latency:              6.54085 ns/msg
 [+] Sequence Gaps Detected:          0
 
 === [MODE 2] TWO-THREAD SPSC PIPELINE (PARSER -> ALPHA ENGINE) ===
 [+] SPSC Messages Processed:        2000000
-[+] SPSC Pipeline Elapsed:          0.0166607 s
-[+] SPSC Cross-Core Throughput:     120.043 M msg/sec
+[+] SPSC Pipeline Elapsed:          0.0164077 s
+[+] SPSC Cross-Core Throughput:     121.894 M msg/sec
 [+] Consumer Real-Time VWAP Metric: 180.03
 ```
 
