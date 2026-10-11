@@ -19,6 +19,11 @@ public:
     static constexpr uint64_t EMPTY_KEY = 0;
     static constexpr uint64_t DELETED_KEY = 0xFFFFFFFFFFFFFFFFULL;
     static constexpr size_t NUM_BUCKETS = 16384;
+    static constexpr size_t NUM_SUMMARY = 256;
+
+    static inline size_t hash_order_id(uint64_t order_id) noexcept {
+        return (order_id ^ (order_id >> 16)) & MAP_MASK;
+    }
 
     void reset() noexcept {
         active_orders_ = 0;
@@ -31,6 +36,8 @@ public:
         std::memset(ask_levels_.get(), 0, 500000 * sizeof(uint64_t));
         std::memset(bid_bitmap_.get(), 0, NUM_BUCKETS * sizeof(uint64_t));
         std::memset(ask_bitmap_.get(), 0, NUM_BUCKETS * sizeof(uint64_t));
+        std::memset(bid_summary_.get(), 0, NUM_SUMMARY * sizeof(uint64_t));
+        std::memset(ask_summary_.get(), 0, NUM_SUMMARY * sizeof(uint64_t));
     }
 
     OrderBook() {
@@ -41,11 +48,13 @@ public:
         ask_levels_ = std::make_unique<uint64_t[]>(500000);
         bid_bitmap_ = std::make_unique<uint64_t[]>(NUM_BUCKETS);
         ask_bitmap_ = std::make_unique<uint64_t[]>(NUM_BUCKETS);
+        bid_summary_ = std::make_unique<uint64_t[]>(NUM_SUMMARY);
+        ask_summary_ = std::make_unique<uint64_t[]>(NUM_SUMMARY);
         reset();
     }
 
     inline void add_order(uint64_t order_id, char side, uint32_t shares, uint32_t price) noexcept {
-        size_t idx = (order_id ^ (order_id >> 16)) & MAP_MASK;
+        size_t idx = hash_order_id(order_id);
         size_t first_deleted = MAP_CAPACITY;
         uint32_t packed_price = (price & 0x7FFFFFFF) | (static_cast<uint32_t>(side == 'B') << 31);
 
@@ -78,20 +87,24 @@ public:
 
         uint32_t tick = price / 100;
         if (__builtin_expect(tick < 500000, 1)) {
+            size_t b_idx = tick >> 6;
+            size_t s_idx = b_idx >> 6;
             if (side == 'B') {
                 bid_levels_[tick] += shares;
-                bid_bitmap_[tick >> 6] |= (1ULL << (tick & 63));
+                bid_bitmap_[b_idx] |= (1ULL << (tick & 63));
+                bid_summary_[s_idx] |= (1ULL << (b_idx & 63));
                 if (tick > best_bid_tick_ || best_bid_tick_ >= 500000) best_bid_tick_ = tick;
             } else {
                 ask_levels_[tick] += shares;
-                ask_bitmap_[tick >> 6] |= (1ULL << (tick & 63));
+                ask_bitmap_[b_idx] |= (1ULL << (tick & 63));
+                ask_summary_[s_idx] |= (1ULL << (b_idx & 63));
                 if (tick < best_ask_tick_) best_ask_tick_ = tick;
             }
         }
     }
 
     inline void execute_order(uint64_t order_id, uint32_t shares) noexcept {
-        size_t idx = (order_id ^ (order_id >> 16)) & MAP_MASK;
+        size_t idx = hash_order_id(order_id);
         uint64_t* k_ptr = keys_.get();
         uint32_t* s_ptr = shares_.get();
         uint32_t* p_ptr = prices_.get();
@@ -122,7 +135,7 @@ public:
     }
 
     inline void delete_order(uint64_t order_id) noexcept {
-        size_t idx = (order_id ^ (order_id >> 16)) & MAP_MASK;
+        size_t idx = hash_order_id(order_id);
         uint64_t* k_ptr = keys_.get();
         uint32_t* s_ptr = shares_.get();
         uint32_t* p_ptr = prices_.get();
@@ -144,7 +157,7 @@ public:
     }
 
     inline void replace_order(uint64_t old_order_id, uint64_t new_order_id, uint32_t new_shares, uint32_t new_price) noexcept {
-        size_t idx = (old_order_id ^ (old_order_id >> 16)) & MAP_MASK;
+        size_t idx = hash_order_id(old_order_id);
         uint64_t* k_ptr = keys_.get();
         uint32_t* s_ptr = shares_.get();
         uint32_t* p_ptr = prices_.get();
@@ -175,17 +188,22 @@ public:
 
     [[nodiscard]] uint32_t best_bid() noexcept {
         if (best_bid_tick_ > 0 && best_bid_tick_ < 500000 && bid_levels_[best_bid_tick_] > 0) return best_bid_tick_;
-        size_t start_bucket = (NUM_BUCKETS - 1);
-        for (ssize_t bucket = static_cast<ssize_t>(start_bucket); bucket >= 0; --bucket) {
-            uint64_t mask = bid_bitmap_[bucket];
-            while (mask != 0) {
-                int bit = 63 - __builtin_clzll(mask);
-                uint32_t cand = static_cast<uint32_t>((static_cast<size_t>(bucket) << 6) | bit);
-                if (cand < 500000 && bid_levels_[cand] > 0) {
-                    best_bid_tick_ = cand;
-                    return cand;
+        for (ssize_t s = static_cast<ssize_t>(NUM_SUMMARY - 1); s >= 0; --s) {
+            uint64_t s_mask = bid_summary_[s];
+            while (s_mask != 0) {
+                int s_bit = 63 - __builtin_clzll(s_mask);
+                size_t bucket = (static_cast<size_t>(s) << 6) | s_bit;
+                uint64_t mask = bid_bitmap_[bucket];
+                while (mask != 0) {
+                    int bit = 63 - __builtin_clzll(mask);
+                    uint32_t cand = static_cast<uint32_t>((bucket << 6) | bit);
+                    if (cand < 500000 && bid_levels_[cand] > 0) {
+                        best_bid_tick_ = cand;
+                        return cand;
+                    }
+                    mask &= ~(1ULL << bit);
                 }
-                mask &= ~(1ULL << bit);
+                s_mask &= ~(1ULL << s_bit);
             }
         }
         best_bid_tick_ = 0;
@@ -194,16 +212,22 @@ public:
 
     [[nodiscard]] uint32_t best_ask() noexcept {
         if (best_ask_tick_ < 500000 && ask_levels_[best_ask_tick_] > 0) return best_ask_tick_;
-        for (size_t bucket = 0; bucket < NUM_BUCKETS; ++bucket) {
-            uint64_t mask = ask_bitmap_[bucket];
-            while (mask != 0) {
-                int bit = __builtin_ctzll(mask);
-                uint32_t cand = static_cast<uint32_t>((bucket << 6) | bit);
-                if (cand < 500000 && ask_levels_[cand] > 0) {
-                    best_ask_tick_ = cand;
-                    return cand;
+        for (size_t s = 0; s < NUM_SUMMARY; ++s) {
+            uint64_t s_mask = ask_summary_[s];
+            while (s_mask != 0) {
+                int s_bit = __builtin_ctzll(s_mask);
+                size_t bucket = (s << 6) | s_bit;
+                uint64_t mask = ask_bitmap_[bucket];
+                while (mask != 0) {
+                    int bit = __builtin_ctzll(mask);
+                    uint32_t cand = static_cast<uint32_t>((bucket << 6) | bit);
+                    if (cand < 500000 && ask_levels_[cand] > 0) {
+                        best_ask_tick_ = cand;
+                        return cand;
+                    }
+                    mask &= ~(1ULL << bit);
                 }
-                mask &= ~(1ULL << bit);
+                s_mask &= ~(1ULL << s_bit);
             }
         }
         best_ask_tick_ = 0xFFFFFFFF;
@@ -240,10 +264,15 @@ public:
 private:
     inline void reduce_level(char side, uint32_t tick, uint32_t shares) noexcept {
         if (__builtin_expect(tick >= 500000, 0)) return;
+        size_t b_idx = tick >> 6;
+        size_t s_idx = b_idx >> 6;
         if (side == 'B') {
             if (bid_levels_[tick] <= shares) {
                 bid_levels_[tick] = 0;
-                bid_bitmap_[tick >> 6] &= ~(1ULL << (tick & 63));
+                bid_bitmap_[b_idx] &= ~(1ULL << (tick & 63));
+                if (bid_bitmap_[b_idx] == 0) {
+                    bid_summary_[s_idx] &= ~(1ULL << (b_idx & 63));
+                }
                 if (tick == best_bid_tick_) best_bid_tick_ = 0;
             } else {
                 bid_levels_[tick] -= shares;
@@ -251,7 +280,10 @@ private:
         } else {
             if (ask_levels_[tick] <= shares) {
                 ask_levels_[tick] = 0;
-                ask_bitmap_[tick >> 6] &= ~(1ULL << (tick & 63));
+                ask_bitmap_[b_idx] &= ~(1ULL << (tick & 63));
+                if (ask_bitmap_[b_idx] == 0) {
+                    ask_summary_[s_idx] &= ~(1ULL << (b_idx & 63));
+                }
                 if (tick == best_ask_tick_) best_ask_tick_ = 0xFFFFFFFF;
             } else {
                 ask_levels_[tick] -= shares;
@@ -270,6 +302,8 @@ private:
     std::unique_ptr<uint64_t[]> ask_levels_;
     std::unique_ptr<uint64_t[]> bid_bitmap_;
     std::unique_ptr<uint64_t[]> ask_bitmap_;
+    std::unique_ptr<uint64_t[]> bid_summary_;
+    std::unique_ptr<uint64_t[]> ask_summary_;
 };
 
 }
