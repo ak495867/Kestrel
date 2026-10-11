@@ -27,23 +27,8 @@ class PcapItchParser {
 public:
     static constexpr size_t MAX_LOCATES = 65536;
 
-    PcapItchParser() {
-        books_ = new OrderBook*[MAX_LOCATES]();
-    }
-
-    ~PcapItchParser() {
-        for (size_t i = 0; i < MAX_LOCATES; ++i) {
-            delete books_[i];
-        }
-        delete[] books_;
-    }
-
-    OrderBook& get_book(uint16_t stock_locate) noexcept {
-        if (!books_[stock_locate]) {
-            books_[stock_locate] = new OrderBook();
-        }
-        return *books_[stock_locate];
-    }
+    PcapItchParser() = default;
+    ~PcapItchParser() = default;
 
     ParserStats parse(const uint8_t* data, size_t file_size, OrderBook* default_book = nullptr) {
         ParserStats stats{};
@@ -155,79 +140,78 @@ private:
                 case 'A': {
                     if (__builtin_expect(msg_len < sizeof(ItchAddOrder), 0)) break;
                     stats.add_orders++;
-                    auto m = reinterpret_cast<const ItchAddOrder*>(msg_bytes);
-                    uint16_t locate = bswap16(m->stock_locate);
-                    OrderBook& book = default_book ? *default_book : get_book(locate);
-                    auto res = parse_add_order_fast(msg_bytes);
-                    book.add_order(res.order_id, res.side, res.shares, res.price);
+                    if (default_book) {
+                        auto res = parse_add_order_fast(msg_bytes);
+                        default_book->add_order(res.order_id, res.side, res.shares, res.price);
+                    }
                     break;
                 }
                 case 'F': {
                     if (__builtin_expect(msg_len < sizeof(ItchAddOrderMPID), 0)) break;
                     stats.add_orders++;
-                    auto m = reinterpret_cast<const ItchAddOrderMPID*>(msg_bytes);
-                    uint16_t locate = bswap16(m->stock_locate);
-                    OrderBook& book = default_book ? *default_book : get_book(locate);
-                    uint64_t oid = bswap64(m->order_reference_number);
-                    uint32_t shares = bswap32(m->shares);
-                    uint32_t px = bswap32(m->price);
-                    book.add_order(oid, m->buy_sell_indicator, shares, px);
+                    if (default_book) {
+                        auto m = reinterpret_cast<const ItchAddOrderMPID*>(msg_bytes);
+                        uint64_t oid = bswap64(m->order_reference_number);
+                        uint32_t shares = bswap32(m->shares);
+                        uint32_t px = bswap32(m->price);
+                        default_book->add_order(oid, m->buy_sell_indicator, shares, px);
+                    }
                     break;
                 }
                 case 'E': {
                     if (__builtin_expect(msg_len < sizeof(ItchOrderExecuted), 0)) break;
                     stats.executed_orders++;
-                    auto m = reinterpret_cast<const ItchOrderExecuted*>(msg_bytes);
-                    uint16_t locate = bswap16(m->stock_locate);
-                    OrderBook& book = default_book ? *default_book : get_book(locate);
-                    uint64_t oid = bswap64(m->order_reference_number);
-                    uint32_t shares = bswap32(m->executed_shares);
-                    book.execute_order(oid, shares);
+                    if (default_book) {
+                        auto m = reinterpret_cast<const ItchOrderExecuted*>(msg_bytes);
+                        uint64_t oid = bswap64(m->order_reference_number);
+                        uint32_t shares = bswap32(m->executed_shares);
+                        default_book->execute_order(oid, shares);
+                    }
                     break;
                 }
                 case 'C': {
                     if (__builtin_expect(msg_len < sizeof(ItchOrderExecutedWithPrice), 0)) break;
                     stats.executed_orders++;
-                    auto m = reinterpret_cast<const ItchOrderExecutedWithPrice*>(msg_bytes);
-                    uint16_t locate = bswap16(m->stock_locate);
-                    OrderBook& book = default_book ? *default_book : get_book(locate);
-                    uint64_t oid = bswap64(m->order_reference_number);
-                    uint32_t shares = bswap32(m->executed_shares);
-                    book.execute_order(oid, shares);
+                    if (default_book) {
+                        auto m = reinterpret_cast<const ItchOrderExecutedWithPrice*>(msg_bytes);
+                        uint64_t oid = bswap64(m->order_reference_number);
+                        uint32_t shares = bswap32(m->executed_shares);
+                        default_book->execute_order(oid, shares);
+                    }
                     break;
                 }
                 case 'X': {
                     if (__builtin_expect(msg_len < sizeof(ItchOrderCancel), 0)) break;
                     stats.canceled_orders++;
-                    auto m = reinterpret_cast<const ItchOrderCancel*>(msg_bytes);
-                    uint16_t locate = bswap16(m->stock_locate);
-                    OrderBook& book = default_book ? *default_book : get_book(locate);
-                    uint64_t oid = bswap64(m->order_reference_number);
-                    uint32_t shares = bswap32(m->canceled_shares);
-                    book.cancel_order(oid, shares);
+                    if (default_book) {
+                        auto m = reinterpret_cast<const ItchOrderCancel*>(msg_bytes);
+                        uint64_t oid = bswap64(m->order_reference_number);
+                        uint32_t shares = bswap32(m->canceled_shares);
+                        default_book->cancel_order(oid, shares);
+                    }
                     break;
                 }
                 case 'D': {
                     if (__builtin_expect(msg_len < sizeof(ItchOrderDelete), 0)) break;
                     stats.deleted_orders++;
-                    auto m = reinterpret_cast<const ItchOrderDelete*>(msg_bytes);
-                    uint16_t locate = bswap16(m->stock_locate);
-                    OrderBook& book = default_book ? *default_book : get_book(locate);
-                    uint64_t oid = bswap64(m->order_reference_number);
-                    book.delete_order(oid);
+                    if (default_book) {
+                        auto m = reinterpret_cast<const ItchOrderDelete*>(msg_bytes);
+                        uint64_t oid = bswap64(m->order_reference_number);
+                        default_book->delete_order(oid);
+                    }
                     break;
                 }
                 case 'U': {
                     if (__builtin_expect(msg_len < sizeof(ItchOrderReplace), 0)) break;
                     stats.replaced_orders++;
-                    auto m = reinterpret_cast<const ItchOrderReplace*>(msg_bytes);
-                    uint16_t locate = bswap16(m->stock_locate);
-                    OrderBook& book = default_book ? *default_book : get_book(locate);
-                    uint64_t old_oid = bswap64(m->original_order_reference_number);
-                    uint64_t new_oid = bswap64(m->new_order_reference_number);
-                    uint32_t shares = bswap32(m->shares);
-                    uint32_t px = bswap32(m->price);
-                    book.replace_order(old_oid, new_oid, shares, px);
+                    if (default_book) {
+                        auto m = reinterpret_cast<const ItchOrderReplace*>(msg_bytes);
+                        uint64_t old_oid = bswap64(m->original_order_reference_number);
+                        uint64_t new_oid = bswap64(m->new_order_reference_number);
+                        uint32_t shares = bswap32(m->shares);
+                        uint32_t px = bswap32(m->price);
+                        default_book->replace_order(old_oid, new_oid, shares, px);
+                    }
                     break;
                 }
                 default: {
@@ -240,7 +224,6 @@ private:
         }
     }
 
-    OrderBook** books_{nullptr};
 };
 
 }

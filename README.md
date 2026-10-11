@@ -15,38 +15,47 @@ An ultra-low latency, zero-copy, memory-mapped NASDAQ TotalView-ITCH 5.0 order b
 
 Performance figures reported below distinguish between synthetic benchmark streams, parser-only extraction, end-to-end Limit Order Book reconstruction, and software loopback DMA emulation.
 
-### Measurement Summary (2,000,000 Messages)
+### Measurement Summary
+
+#### 1. Real NASDAQ Exchange Capture (`real_nasdaq.pcap` — 885,954 Messages)
+Tested on genuine NASDAQ TotalView-ITCH 5.0 market data (multiplexed multi-ticker exchange feed with Add, Execute, Cancel, Delete, Replace):
 
 | Benchmark Mode | Throughput | Latency / Msg | Workload & Test Harness |
 | :--- | :--- | :--- | :--- |
-| **Mode 1A: Parser-Only Wire Streaming** | **134.45 M msg/sec** | **~7.44 ns** | Zero-copy header stripping + MOVBE endian swap (no book allocation) |
-| **Mode 1B: Single-Thread End-to-End** | **141.86 M msg/sec** | **~7.05 ns** | In-place zero-copy parsing + SoA flat hash table + bitmapped BBO |
-| **Mode 2: Two-Thread SPSC Pipeline** | **98.77 M msg/sec** | **~10.12 ns** | Core-pinned batched producer-consumer ring buffer + online VWAP |
-| **Mode 3: Kernel-Bypass DMA Consumer** | **87.11 M desc/sec** | **~11.48 ns** | Decoupled cross-core PCIe ring buffer emulation + book update |
+| **Mode 1A: Parser-Only Wire Streaming** | **102.07 M msg/sec** | **~9.80 ns** | Real MoldUDP64/Ethernet capture, zero-copy stripping + byte-swapping |
+| **Mode 1B: Single-Thread End-to-End** | **50.98 M msg/sec** | **~19.62 ns** | Real exchange stream reconstructed into SoA Order Book + Bitmapped BBO |
+| **Mode 2: Two-Thread SPSC Pipeline** | **34.82 M msg/sec** | **~28.72 ns** | Producer/Consumer cross-core queue dispatching real Add Orders + online VWAP |
 
 ```text
+[*] Memory-mapping file: real_nasdaq.pcap (Real Exchange Capture)
+[+] Successfully mapped 94813890 bytes.
+
 === [MODE 1A] PARSER-ONLY WIRE STREAMING (NO BOOK ALLOCATION) ===
-[+] Parser-Only Peak Throughput:     134.447 M msg/sec
-[+] Parser-Only Latency:             7.43785 ns/msg
+[+] Parser-Only Peak Throughput:     102.071 M msg/sec
+[+] Parser-Only Latency:             9.79712 ns/msg
 
 === [MODE 1B] END-TO-END SINGLE-THREADED RECONSTRUCTION (PARSER + LOB) ===
-[+] Single-Threaded Best Time:       0.0140986 s
-[+] Single-Threaded Peak Throughput: 141.858 M msg/sec
-[+] End-to-End Latency:              7.0493 ns/msg
+[+] Single-Threaded Best Time:       0.0173792 s
+[+] Single-Threaded Peak Throughput: 50.9778 M msg/sec
+[+] End-to-End Latency:              19.6164 ns/msg
 [+] Sequence Gaps Detected:          0
 
 === [MODE 2] TWO-THREAD SPSC PIPELINE (PARSER -> ALPHA ENGINE) ===
-[+] SPSC Messages Processed:        2000000
-[+] SPSC Pipeline Elapsed:          0.0202481 s
-[+] SPSC Cross-Core Throughput:     98.7747 M msg/sec
-[+] Consumer Real-Time VWAP Metric: 180.03
-
-=== [MODE 3] CUSTOM KERNEL-BYPASS DMA INGESTION ===
-[+] Ingestion Messages:             2000000
-[+] Ingestion Elapsed:              0.0229605 s
-[+] Kernel-Bypass Ingestion Rate:   87.1061 M desc/sec
-[+] Average Latency:                11.4802 ns/desc
+[+] SPSC Messages Processed:        261521
+[+] SPSC Pipeline Elapsed:          0.0075101 s
+[+] SPSC Cross-Core Throughput:     34.8226 M msg/sec
+[+] Consumer Real-Time VWAP Metric: 51.5833
 ```
+
+#### 2. Synthetic Benchmark Stream (`sample_nasdaq.pcap` — 2,000,000 Messages)
+Tested on dense single-symbol Add Order stream:
+
+| Benchmark Mode | Throughput | Latency / Msg | Workload & Test Harness |
+| :--- | :--- | :--- | :--- |
+| **Mode 1A: Parser-Only Wire Streaming** | **258.93 M msg/sec** | **~3.86 ns** | Zero-copy header stripping + MOVBE endian swap (no book allocation) |
+| **Mode 1B: Single-Thread End-to-End** | **129.00 M msg/sec** | **~7.75 ns** | In-place zero-copy parsing + SoA flat hash table + bitmapped BBO |
+| **Mode 2: Two-Thread SPSC Pipeline** | **90.08 M msg/sec** | **~11.10 ns** | Core-pinned batched producer-consumer ring buffer + online VWAP |
+| **Mode 3: Kernel-Bypass DMA Consumer** | **87.11 M desc/sec** | **~11.48 ns** | Decoupled cross-core PCIe ring buffer emulation + book update |
 
 > [!NOTE]
 > - **Synthetic vs. Real Captures:** The default benchmark harness generates a reproducible 2M-message synthetic MoldUDP64/ITCH stream (`sample_nasdaq.pcap`). Passing a recorded NASDAQ TotalView-ITCH dump (`./kestrel_bench /path/to/capture.pcap`) runs identically across the same zero-copy parsing pipeline.

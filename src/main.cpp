@@ -237,25 +237,55 @@ int main(int argc, char* argv[]) {
                 uint16_t msg_count = kestrel::bswap16(mold->message_count);
                 size_t mold_offset = sizeof(kestrel::MoldUDP64Header);
 
-                for (uint16_t i = 0; i < msg_count; ++i) {
-                    mold_offset += sizeof(kestrel::MoldUDP64MessageBlock);
-                    const uint8_t* msg_bytes = payload + mold_offset;
-                    auto res = kestrel::parse_add_order_fast(msg_bytes);
-                    auto m = reinterpret_cast<const kestrel::ItchAddOrder*>(msg_bytes);
-                    uint16_t locate = kestrel::bswap16(m->stock_locate);
+                size_t payload_len = incl_len - (sizeof(kestrel::EthernetHeader) + sizeof(kestrel::IPv4Header) + sizeof(kestrel::UdpHeader));
+                if (mold_offset > payload_len) {
+                    offset += incl_len;
+                    continue;
+                }
 
-                    prod_events[prod_count++] = {res.order_id, res.shares, res.price, locate, res.side, false};
-                    if (prod_count == PROD_BATCH) {
-                        size_t pushed = 0;
-                        while (pushed < PROD_BATCH) {
-                            size_t res_push = queue->push_batch(prod_events + pushed, PROD_BATCH - pushed);
-                            pushed += res_push;
-                            if (res_push == 0) _mm_pause();
+                for (uint16_t i = 0; i < msg_count && mold_offset + sizeof(kestrel::MoldUDP64MessageBlock) <= payload_len; ++i) {
+                    auto blk = reinterpret_cast<const kestrel::MoldUDP64MessageBlock*>(payload + mold_offset);
+                    uint16_t msg_len = kestrel::bswap16(blk->message_length);
+                    mold_offset += sizeof(kestrel::MoldUDP64MessageBlock);
+                    if (mold_offset + msg_len > payload_len) break;
+
+                    const uint8_t* msg_bytes = payload + mold_offset;
+                    uint8_t mtype = msg_bytes[0];
+                    if (mtype == 'A' && msg_len >= sizeof(kestrel::ItchAddOrder)) {
+                        auto res = kestrel::parse_add_order_fast(msg_bytes);
+                        auto m = reinterpret_cast<const kestrel::ItchAddOrder*>(msg_bytes);
+                        uint16_t locate = kestrel::bswap16(m->stock_locate);
+
+                        prod_events[prod_count++] = {res.order_id, res.shares, res.price, locate, res.side, false};
+                        if (prod_count == PROD_BATCH) {
+                            size_t pushed = 0;
+                            while (pushed < PROD_BATCH) {
+                                size_t res_push = queue->push_batch(prod_events + pushed, PROD_BATCH - pushed);
+                                pushed += res_push;
+                                if (res_push == 0) _mm_pause();
+                            }
+                            prod_count = 0;
                         }
-                        prod_count = 0;
+                    } else if (mtype == 'F' && msg_len >= sizeof(kestrel::ItchAddOrderMPID)) {
+                        auto m = reinterpret_cast<const kestrel::ItchAddOrderMPID*>(msg_bytes);
+                        uint64_t oid = kestrel::bswap64(m->order_reference_number);
+                        uint32_t shares = kestrel::bswap32(m->shares);
+                        uint32_t px = kestrel::bswap32(m->price);
+                        uint16_t locate = kestrel::bswap16(m->stock_locate);
+
+                        prod_events[prod_count++] = {oid, shares, px, locate, m->buy_sell_indicator, false};
+                        if (prod_count == PROD_BATCH) {
+                            size_t pushed = 0;
+                            while (pushed < PROD_BATCH) {
+                                size_t res_push = queue->push_batch(prod_events + pushed, PROD_BATCH - pushed);
+                                pushed += res_push;
+                                if (res_push == 0) _mm_pause();
+                            }
+                            prod_count = 0;
+                        }
                     }
 
-                    mold_offset += sizeof(kestrel::ItchAddOrder);
+                    mold_offset += msg_len;
                 }
 
                 offset += incl_len;
