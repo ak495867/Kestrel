@@ -86,19 +86,23 @@ public:
 
     inline void execute_order(uint64_t order_id, uint32_t shares) noexcept {
         size_t idx = (order_id ^ (order_id >> 16)) & MAP_MASK;
+        uint64_t* k_ptr = keys_.get();
+        uint32_t* s_ptr = shares_.get();
+        uint32_t* p_ptr = prices_.get();
+
         while (true) {
-            uint64_t k = keys_[idx];
+            uint64_t k = k_ptr[idx];
             if (k == EMPTY_KEY) return;
             if (k == order_id) {
-                uint32_t raw_price = prices_[idx];
+                uint32_t raw_price = p_ptr[idx];
                 char side = (raw_price >> 31) ? 'B' : 'S';
                 uint32_t tick = (raw_price & 0x7FFFFFFF) / 100;
-                if (shares_[idx] <= shares) {
-                    reduce_level(side, tick, shares_[idx]);
-                    keys_[idx] = DELETED_KEY;
+                if (s_ptr[idx] <= shares) {
+                    reduce_level(side, tick, s_ptr[idx]);
+                    k_ptr[idx] = DELETED_KEY;
                     active_orders_--;
                 } else {
-                    shares_[idx] -= shares;
+                    s_ptr[idx] -= shares;
                     reduce_level(side, tick, shares);
                 }
                 return;
@@ -113,15 +117,19 @@ public:
 
     inline void delete_order(uint64_t order_id) noexcept {
         size_t idx = (order_id ^ (order_id >> 16)) & MAP_MASK;
+        uint64_t* k_ptr = keys_.get();
+        uint32_t* s_ptr = shares_.get();
+        uint32_t* p_ptr = prices_.get();
+
         while (true) {
-            uint64_t k = keys_[idx];
+            uint64_t k = k_ptr[idx];
             if (k == EMPTY_KEY) return;
             if (k == order_id) {
-                uint32_t raw_price = prices_[idx];
+                uint32_t raw_price = p_ptr[idx];
                 char side = (raw_price >> 31) ? 'B' : 'S';
                 uint32_t tick = (raw_price & 0x7FFFFFFF) / 100;
-                reduce_level(side, tick, shares_[idx]);
-                keys_[idx] = DELETED_KEY;
+                reduce_level(side, tick, s_ptr[idx]);
+                k_ptr[idx] = DELETED_KEY;
                 active_orders_--;
                 return;
             }
@@ -131,15 +139,19 @@ public:
 
     inline void replace_order(uint64_t old_order_id, uint64_t new_order_id, uint32_t new_shares, uint32_t new_price) noexcept {
         size_t idx = (old_order_id ^ (old_order_id >> 16)) & MAP_MASK;
+        uint64_t* k_ptr = keys_.get();
+        uint32_t* s_ptr = shares_.get();
+        uint32_t* p_ptr = prices_.get();
+
         while (true) {
-            uint64_t k = keys_[idx];
+            uint64_t k = k_ptr[idx];
             if (k == EMPTY_KEY) return;
             if (k == old_order_id) {
-                uint32_t raw_price = prices_[idx];
+                uint32_t raw_price = p_ptr[idx];
                 char side = (raw_price >> 31) ? 'B' : 'S';
                 uint32_t old_tick = (raw_price & 0x7FFFFFFF) / 100;
-                reduce_level(side, old_tick, shares_[idx]);
-                keys_[idx] = DELETED_KEY;
+                reduce_level(side, old_tick, s_ptr[idx]);
+                k_ptr[idx] = DELETED_KEY;
                 active_orders_--;
                 add_order(new_order_id, side, new_shares, new_price);
                 return;
