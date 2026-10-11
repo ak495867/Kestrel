@@ -55,34 +55,50 @@ public:
 
     inline void add_order(uint64_t order_id, char side, uint32_t shares, uint32_t price) noexcept {
         size_t idx = hash_order_id(order_id);
-        size_t first_deleted = MAP_CAPACITY;
         uint32_t packed_price = (price & 0x7FFFFFFF) | (static_cast<uint32_t>(side == 'B') << 31);
 
         uint64_t* k_ptr = keys_.get();
         uint32_t* s_ptr = shares_.get();
         uint32_t* p_ptr = prices_.get();
 
-        while (true) {
-            uint64_t k = k_ptr[idx];
-            if (k == EMPTY_KEY) {
-                if (first_deleted != MAP_CAPACITY) idx = first_deleted;
-                k_ptr[idx] = order_id;
-                s_ptr[idx] = shares;
-                p_ptr[idx] = packed_price;
-                active_orders_++;
-                break;
-            } else if (k == DELETED_KEY) {
-                if (first_deleted == MAP_CAPACITY) first_deleted = idx;
-            } else if (k == order_id) {
-                uint32_t old_raw = p_ptr[idx];
-                char old_side = (old_raw >> 31) ? 'B' : 'S';
-                uint32_t old_tick = (old_raw & 0x7FFFFFFF) / 100;
-                reduce_level(old_side, old_tick, s_ptr[idx]);
-                s_ptr[idx] = shares;
-                p_ptr[idx] = packed_price;
-                break;
-            }
+        uint64_t k0 = k_ptr[idx];
+        if (__builtin_expect(k0 == EMPTY_KEY, 1)) {
+            k_ptr[idx] = order_id;
+            s_ptr[idx] = shares;
+            p_ptr[idx] = packed_price;
+            active_orders_++;
+        } else if (__builtin_expect(k0 == order_id, 0)) {
+            uint32_t old_raw = p_ptr[idx];
+            char old_side = (old_raw >> 31) ? 'B' : 'S';
+            uint32_t old_tick = (old_raw & 0x7FFFFFFF) / 100;
+            reduce_level(old_side, old_tick, s_ptr[idx]);
+            s_ptr[idx] = shares;
+            p_ptr[idx] = packed_price;
+        } else {
+            size_t first_deleted = (k0 == DELETED_KEY) ? idx : MAP_CAPACITY;
             idx = (idx + 1) & MAP_MASK;
+            while (true) {
+                uint64_t k = k_ptr[idx];
+                if (k == EMPTY_KEY) {
+                    if (first_deleted != MAP_CAPACITY) idx = first_deleted;
+                    k_ptr[idx] = order_id;
+                    s_ptr[idx] = shares;
+                    p_ptr[idx] = packed_price;
+                    active_orders_++;
+                    break;
+                } else if (k == DELETED_KEY) {
+                    if (first_deleted == MAP_CAPACITY) first_deleted = idx;
+                } else if (k == order_id) {
+                    uint32_t old_raw = p_ptr[idx];
+                    char old_side = (old_raw >> 31) ? 'B' : 'S';
+                    uint32_t old_tick = (old_raw & 0x7FFFFFFF) / 100;
+                    reduce_level(old_side, old_tick, s_ptr[idx]);
+                    s_ptr[idx] = shares;
+                    p_ptr[idx] = packed_price;
+                    break;
+                }
+                idx = (idx + 1) & MAP_MASK;
+            }
         }
 
         uint32_t tick = price / 100;

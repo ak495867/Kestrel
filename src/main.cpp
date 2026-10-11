@@ -182,7 +182,7 @@ int main(int argc, char* argv[]) {
 
         std::thread consumer([&]() {
             kestrel::set_current_thread_affinity(4);
-            constexpr size_t BATCH_SIZE = 64;
+            constexpr size_t BATCH_SIZE = 256;
             QueueOrderEvent batch[BATCH_SIZE];
             uint64_t total = 0;
             double local_vwap_sum = 0.0;
@@ -223,7 +223,7 @@ int main(int argc, char* argv[]) {
             size_t file_size = mmap_file.size();
             size_t offset = sizeof(kestrel::PcapFileHeader);
 
-            constexpr size_t PROD_BATCH = 64;
+            constexpr size_t PROD_BATCH = 256;
             QueueOrderEvent prod_events[PROD_BATCH];
             size_t prod_count = 0;
 

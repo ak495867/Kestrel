@@ -22,28 +22,28 @@ Tested on genuine NASDAQ TotalView-ITCH 5.0 market data (multiplexed multi-ticke
 
 | Benchmark Mode | Throughput | Latency / Msg | Workload & Test Harness |
 | :--- | :--- | :--- | :--- |
-| **Mode 1A: Parser-Only Wire Streaming** | **142.08 M msg/sec** | **~7.04 ns** | Real MoldUDP64/Ethernet capture, zero-copy branch-specialized stripping |
-| **Mode 1B: Single-Thread End-to-End** | **53.98 M msg/sec** | **~18.52 ns** | Real exchange stream reconstructed into SoA Order Book + Bitmapped BBO |
-| **Mode 2: Two-Thread SPSC Pipeline** | **38.77 M msg/sec** | **~25.79 ns** | Producer/Consumer cross-core queue dispatching real Add Orders + online VWAP |
+| **Mode 1A: Parser-Only Wire Streaming** | **142.57 M msg/sec** | **~7.01 ns** | Real MoldUDP64/Ethernet capture, zero-copy branch-specialized stripping |
+| **Mode 1B: Single-Thread End-to-End** | **54.64 M msg/sec** | **~18.30 ns** | Real exchange stream reconstructed into SoA Order Book + Bitmapped BBO |
+| **Mode 2: Two-Thread SPSC Pipeline** | **40.84 M msg/sec** | **~24.49 ns** | Producer/Consumer cross-core queue dispatching real Add Orders + online VWAP |
 
 ```text
 [*] Memory-mapping file: real_nasdaq.pcap (Real Exchange Capture)
 [+] Successfully mapped 94813890 bytes.
 
 === [MODE 1A] PARSER-ONLY WIRE STREAMING (NO BOOK ALLOCATION) ===
-[+] Parser-Only Peak Throughput:     142.082 M msg/sec
-[+] Parser-Only Latency:             7.03818 ns/msg
+[+] Parser-Only Peak Throughput:     142.567 M msg/sec
+[+] Parser-Only Latency:             7.01425 ns/msg
 
 === [MODE 1B] END-TO-END SINGLE-THREADED RECONSTRUCTION (PARSER + LOB) ===
-[+] Single-Threaded Best Time:       0.0164122 s
-[+] Single-Threaded Peak Throughput: 53.9814 M msg/sec
-[+] End-to-End Latency:              18.5249 ns/msg
+[+] Single-Threaded Best Time:       0.0162157 s
+[+] Single-Threaded Peak Throughput: 54.6356 M msg/sec
+[+] End-to-End Latency:              18.3031 ns/msg
 [+] Sequence Gaps Detected:          0
 
 === [MODE 2] TWO-THREAD SPSC PIPELINE (PARSER -> ALPHA ENGINE) ===
 [+] SPSC Messages Processed:        261521
-[+] SPSC Pipeline Elapsed:          0.0067456 s
-[+] SPSC Cross-Core Throughput:     38.7691 M msg/sec
+[+] SPSC Pipeline Elapsed:          0.0064043 s
+[+] SPSC Cross-Core Throughput:     40.8352 M msg/sec
 [+] Consumer Real-Time VWAP Metric: 51.5833
 ```
 
