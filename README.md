@@ -191,6 +191,7 @@ Kestrel/
 │       ├── pcap.hpp            # Packed PCAP, Ethernet, IPv4, UDP framing
 │       └── spsc_queue.hpp      # Batched cacheline-padded lock-free ring buffer
 ├── src/
+│   ├── convert_itch_to_pcap.cpp # Tool to slice raw ITCH streams into MoldUDP64 PCAPs
 │   ├── main.cpp                # Dual-mode benchmark harness (Parser-only & End-to-end)
 │   ├── test_bypass.cpp         # Kernel-bypass DMA ingestion test harness
 │   ├── test_differential.cpp   # Differential verification against map/unordered_map
@@ -201,7 +202,7 @@ Kestrel/
 │   │   └── kestrel_uio.c       # Linux zero-copy PCIe DMA driver module
 │   ├── itch_parser_fsm.sv      # Multi-type backpressure-safe AXI4-Stream ITCH parser FSM
 │   └── tb_itch_parser_fsm.sv   # SystemVerilog testbench with backpressure & multi-type assertions
-├── CMakeLists.txt              # C++20, -O3, -flto, -mavx2 build pipeline
+├── CMakeLists.txt              # C++20, -O3, -flto, -mavx2, CTest registered targets
 └── README.md
 ```
 
@@ -220,15 +221,18 @@ cmake -B build -G "Ninja" -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Releas
 cmake --build build --config Release
 ```
 
-### Execution
+### Execution & Automated Testing
 ```bash
+# Run the automated test suite via CTest (All 3 verification targets)
+ctest --test-dir build --output-on-failure
+
 # Run full benchmark harness (Parser-only + End-to-End single-thread + SPSC pipeline)
 ./build/kestrel_bench
 
 # Or run against an external recorded NASDAQ ITCH PCAP file
-./build/kestrel_bench /path/to/capture.pcap
+./build/kestrel_bench real_nasdaq.pcap
 
-# Run targeted order-book BBO invariant tests
+# Run targeted order-book BBO invariant tests directly
 ./build/kestrel_ob_test
 
 # Run differential randomized test suite (200k operations vs reference model)

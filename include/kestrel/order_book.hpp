@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <vector>
+#include <memory>
 #include <iostream>
 #include <iomanip>
 #include <string>
@@ -20,13 +21,21 @@ public:
     static constexpr size_t NUM_BUCKETS = 16384;
 
     OrderBook() {
-        keys_.assign(MAP_CAPACITY, EMPTY_KEY);
-        shares_.resize(MAP_CAPACITY);
-        prices_.resize(MAP_CAPACITY);
-        bid_levels_.assign(500000, 0);
-        ask_levels_.assign(500000, 0);
-        bid_bitmap_.assign(NUM_BUCKETS, 0);
-        ask_bitmap_.assign(NUM_BUCKETS, 0);
+        keys_ = std::make_unique<uint64_t[]>(MAP_CAPACITY);
+        shares_ = std::make_unique<uint32_t[]>(MAP_CAPACITY);
+        prices_ = std::make_unique<uint32_t[]>(MAP_CAPACITY);
+        bid_levels_ = std::make_unique<uint64_t[]>(500000);
+        ask_levels_ = std::make_unique<uint64_t[]>(500000);
+        bid_bitmap_ = std::make_unique<uint64_t[]>(NUM_BUCKETS);
+        ask_bitmap_ = std::make_unique<uint64_t[]>(NUM_BUCKETS);
+
+        std::memset(keys_.get(), 0, MAP_CAPACITY * sizeof(uint64_t));
+        std::memset(shares_.get(), 0, MAP_CAPACITY * sizeof(uint32_t));
+        std::memset(prices_.get(), 0, MAP_CAPACITY * sizeof(uint32_t));
+        std::memset(bid_levels_.get(), 0, 500000 * sizeof(uint64_t));
+        std::memset(ask_levels_.get(), 0, 500000 * sizeof(uint64_t));
+        std::memset(bid_bitmap_.get(), 0, NUM_BUCKETS * sizeof(uint64_t));
+        std::memset(ask_bitmap_.get(), 0, NUM_BUCKETS * sizeof(uint64_t));
     }
 
     inline void add_order(uint64_t order_id, char side, uint32_t shares, uint32_t price) noexcept {
@@ -34,24 +43,28 @@ public:
         size_t first_deleted = MAP_CAPACITY;
         uint32_t packed_price = (price & 0x7FFFFFFF) | (static_cast<uint32_t>(side == 'B') << 31);
 
+        uint64_t* k_ptr = keys_.get();
+        uint32_t* s_ptr = shares_.get();
+        uint32_t* p_ptr = prices_.get();
+
         while (true) {
-            uint64_t k = keys_[idx];
+            uint64_t k = k_ptr[idx];
             if (k == EMPTY_KEY) {
                 if (first_deleted != MAP_CAPACITY) idx = first_deleted;
-                keys_[idx] = order_id;
-                shares_[idx] = shares;
-                prices_[idx] = packed_price;
+                k_ptr[idx] = order_id;
+                s_ptr[idx] = shares;
+                p_ptr[idx] = packed_price;
                 active_orders_++;
                 break;
             } else if (k == DELETED_KEY) {
                 if (first_deleted == MAP_CAPACITY) first_deleted = idx;
             } else if (k == order_id) {
-                uint32_t old_raw = prices_[idx];
+                uint32_t old_raw = p_ptr[idx];
                 char old_side = (old_raw >> 31) ? 'B' : 'S';
                 uint32_t old_tick = (old_raw & 0x7FFFFFFF) / 100;
-                reduce_level(old_side, old_tick, shares_[idx]);
-                shares_[idx] = shares;
-                prices_[idx] = packed_price;
+                reduce_level(old_side, old_tick, s_ptr[idx]);
+                s_ptr[idx] = shares;
+                p_ptr[idx] = packed_price;
                 break;
             }
             idx = (idx + 1) & MAP_MASK;
@@ -232,13 +245,13 @@ private:
     uint32_t best_bid_tick_{0};
     uint32_t best_ask_tick_{0xFFFFFFFF};
 
-    std::vector<uint64_t> keys_;
-    std::vector<uint32_t> shares_;
-    std::vector<uint32_t> prices_;
-    std::vector<uint64_t> bid_levels_;
-    std::vector<uint64_t> ask_levels_;
-    std::vector<uint64_t> bid_bitmap_;
-    std::vector<uint64_t> ask_bitmap_;
+    std::unique_ptr<uint64_t[]> keys_;
+    std::unique_ptr<uint32_t[]> shares_;
+    std::unique_ptr<uint32_t[]> prices_;
+    std::unique_ptr<uint64_t[]> bid_levels_;
+    std::unique_ptr<uint64_t[]> ask_levels_;
+    std::unique_ptr<uint64_t[]> bid_bitmap_;
+    std::unique_ptr<uint64_t[]> ask_bitmap_;
 };
 
 }

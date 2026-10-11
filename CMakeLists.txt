@@ -29,3 +29,8 @@ add_executable(kestrel_ob_test
 add_executable(kestrel_differential_test
     src/test_differential.cpp
 )
+
+enable_testing()
+add_test(NAME OrderBookInvariants COMMAND kestrel_ob_test)
+add_test(NAME DifferentialModel COMMAND kestrel_differential_test)
+add_test(NAME KernelBypassDMA COMMAND kestrel_bypass_test)
