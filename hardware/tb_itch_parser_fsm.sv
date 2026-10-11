@@ -14,6 +14,7 @@ module tb_itch_parser_fsm;
     logic [31:0] m_shares;
     logic [31:0] m_price;
     logic [7:0]  m_side;
+    logic [7:0]  m_msg_type;
     logic        m_order_valid;
     logic        m_order_ready;
 
@@ -29,6 +30,7 @@ module tb_itch_parser_fsm;
         .m_shares(m_shares),
         .m_price(m_price),
         .m_side(m_side),
+        .m_msg_type(m_msg_type),
         .m_order_valid(m_order_valid),
         .m_order_ready(m_order_ready)
     );
@@ -88,6 +90,10 @@ module tb_itch_parser_fsm;
         m_order_ready = 1;
         @(posedge clk);
 
+        if (m_msg_type != 8'h41) begin
+            $display("[-] Message type mismatch: %h", m_msg_type);
+            $fatal(1);
+        end
         if (m_order_id != 64'h0123456789ABCDEF) begin
             $display("[-] Order ID mismatch: %h", m_order_id);
             $fatal(1);
@@ -101,7 +107,37 @@ module tb_itch_parser_fsm;
             $fatal(1);
         end
 
-        $display("[+] Hardware FSM backpressure handshake and parser verification PASSED");
+        @(posedge clk);
+        s_axis_tvalid = 1;
+        s_axis_tdata  = 64'h0000000000000000;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000800;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000011;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000000;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000000;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000001;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000440013000000;
+        @(posedge clk);
+        s_axis_tdata  = 64'hEFCDAB8967452301;
+        s_axis_tlast  = 1;
+        s_axis_tkeep  = 8'hFF;
+
+        @(posedge clk);
+        s_axis_tvalid = 0;
+        s_axis_tlast  = 0;
+
+        @(posedge clk);
+        if (!m_order_valid || m_msg_type != 8'h44 || m_order_id != 64'h0123456789ABCDEF) begin
+            $display("[-] Delete order assertion failed");
+            $fatal(1);
+        end
+
+        $display("[+] Multi-message hardware FSM (Add/Delete) and backpressure verification PASSED");
         #20;
         $finish;
     end

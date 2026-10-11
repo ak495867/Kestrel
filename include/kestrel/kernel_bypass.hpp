@@ -85,11 +85,17 @@ public:
         return to_read;
     }
 
-    inline void mock_inject(const DmaOrderDescriptor& desc) noexcept {
-        if (!is_mock_) return;
-        uint32_t tail = ring_->tail;
+    inline bool mock_inject(const DmaOrderDescriptor& desc) noexcept {
+        if (!is_mock_) return false;
+        uint32_t tail = __atomic_load_n(&ring_->tail, __ATOMIC_RELAXED);
+        uint32_t head = __atomic_load_n(&ring_->head, __ATOMIC_ACQUIRE);
+        size_t occupied = (tail >= head) ? (tail - head) : (KESTREL_RING_ENTRY_COUNT - head + tail);
+        if (occupied >= (KESTREL_RING_ENTRY_COUNT - 1)) {
+            return false;
+        }
         ring_->descriptors[tail & KESTREL_RING_ENTRY_MASK] = desc;
         __atomic_store_n(&ring_->tail, (tail + 1) & KESTREL_RING_ENTRY_MASK, __ATOMIC_RELEASE);
+        return true;
     }
 
     [[nodiscard]] bool is_hardware_bound() const noexcept { return !is_mock_; }

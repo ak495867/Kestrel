@@ -14,6 +14,7 @@ module itch_parser_fsm (
     output logic [31:0] m_shares,
     output logic [31:0] m_price,
     output logic [7:0]  m_side,
+    output logic [7:0]  m_msg_type,
     output logic        m_order_valid,
     input  logic        m_order_ready
 );
@@ -39,6 +40,7 @@ module itch_parser_fsm (
     logic [31:0] shares_reg, shares_next;
     logic [31:0] price_reg, price_next;
     logic [7:0]  side_reg, side_next;
+    logic [7:0]  msg_type_reg, msg_type_next;
     logic        order_valid_reg, order_valid_next;
 
     assign s_axis_tready = (state != ST_ITCH_MSG_4) || m_order_ready;
@@ -46,6 +48,7 @@ module itch_parser_fsm (
     assign m_shares      = shares_reg;
     assign m_price       = price_reg;
     assign m_side        = side_reg;
+    assign m_msg_type    = msg_type_reg;
     assign m_order_valid = order_valid_reg;
 
     always_ff @(posedge clk or negedge rst_n) begin
@@ -55,6 +58,7 @@ module itch_parser_fsm (
             shares_reg      <= 32'd0;
             price_reg       <= 32'd0;
             side_reg        <= 8'd0;
+            msg_type_reg    <= 8'd0;
             order_valid_reg <= 1'b0;
         end else begin
             state           <= state_next;
@@ -62,6 +66,7 @@ module itch_parser_fsm (
             shares_reg      <= shares_next;
             price_reg       <= price_next;
             side_reg        <= side_next;
+            msg_type_reg    <= msg_type_next;
             order_valid_reg <= order_valid_next;
         end
     end
@@ -72,6 +77,7 @@ module itch_parser_fsm (
         shares_next      = shares_reg;
         price_next       = price_reg;
         side_next        = side_reg;
+        msg_type_next    = msg_type_reg;
         order_valid_next = order_valid_reg;
 
         if (order_valid_reg && m_order_ready) begin
@@ -86,6 +92,8 @@ module itch_parser_fsm (
                     end else begin
                         state_next = ST_ITCH_MSG_0;
                     end
+                end else begin
+                    state_next = ST_IDLE;
                 end
             end
         end else if (s_axis_tvalid && s_axis_tready) begin
@@ -115,11 +123,11 @@ module itch_parser_fsm (
                 end
 
                 ST_ITCH_MSG_0: begin
-                    if (s_axis_tdata[23:16] == 8'h41) begin
-                        state_next = ST_ITCH_MSG_1;
-                    end else begin
-                        state_next = ST_DROP;
-                    end
+                    msg_type_next = s_axis_tdata[23:16];
+                    case (s_axis_tdata[23:16])
+                        8'h41, 8'h45, 8'h58, 8'h44: state_next = ST_ITCH_MSG_1;
+                        default: state_next = ST_DROP;
+                    endcase
                 end
 
                 ST_ITCH_MSG_1: begin
@@ -131,16 +139,37 @@ module itch_parser_fsm (
                     order_id_next[23:16] = s_axis_tdata[47:40];
                     order_id_next[15:8]  = s_axis_tdata[55:48];
                     order_id_next[7:0]   = s_axis_tdata[63:56];
-                    state_next = ST_ITCH_MSG_2;
+                    if (msg_type_reg == 8'h44) begin
+                        shares_next = 32'd0;
+                        price_next = 32'd0;
+                        side_next = 8'd0;
+                        order_valid_next = 1'b1;
+                        state_next = ST_ITCH_MSG_4;
+                    end else begin
+                        state_next = ST_ITCH_MSG_2;
+                    end
                 end
 
                 ST_ITCH_MSG_2: begin
-                    side_next = s_axis_tdata[7:0];
-                    shares_next[31:24] = s_axis_tdata[15:8];
-                    shares_next[23:16] = s_axis_tdata[23:16];
-                    shares_next[15:8]  = s_axis_tdata[31:24];
-                    shares_next[7:0]   = s_axis_tdata[39:32];
-                    state_next = ST_ITCH_MSG_3;
+                    if (msg_type_reg == 8'h41) begin
+                        side_next = s_axis_tdata[7:0];
+                        shares_next[31:24] = s_axis_tdata[15:8];
+                        shares_next[23:16] = s_axis_tdata[23:16];
+                        shares_next[15:8]  = s_axis_tdata[31:24];
+                        shares_next[7:0]   = s_axis_tdata[39:32];
+                        state_next = ST_ITCH_MSG_3;
+                    end else if (msg_type_reg == 8'h45 || msg_type_reg == 8'h58) begin
+                        side_next = 8'd0;
+                        shares_next[31:24] = s_axis_tdata[7:0];
+                        shares_next[23:16] = s_axis_tdata[15:8];
+                        shares_next[15:8]  = s_axis_tdata[23:16];
+                        shares_next[7:0]   = s_axis_tdata[31:24];
+                        price_next = 32'd0;
+                        order_valid_next = 1'b1;
+                        state_next = ST_ITCH_MSG_4;
+                    end else begin
+                        state_next = ST_DROP;
+                    end
                 end
 
                 ST_ITCH_MSG_3: begin
