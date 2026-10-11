@@ -56,6 +56,25 @@ public:
                 continue;
             }
 
+            constexpr size_t FIXED_HDRS_LEN = sizeof(EthernetHeader) + sizeof(IPv4Header) + sizeof(UdpHeader);
+            if (__builtin_expect(incl_len >= FIXED_HDRS_LEN, 1)) {
+                auto ip = reinterpret_cast<const IPv4Header*>(data + offset + sizeof(EthernetHeader));
+                if (__builtin_expect(ip->version_ihl == 0x45 && ip->protocol == 17, 1)) {
+                    auto udp = reinterpret_cast<const UdpHeader*>(data + offset + sizeof(EthernetHeader) + sizeof(IPv4Header));
+                    uint16_t udp_len = bswap16(udp->length);
+                    if (__builtin_expect(udp_len >= sizeof(UdpHeader), 1)) {
+                        size_t payload_len = udp_len - sizeof(UdpHeader);
+                        if (FIXED_HDRS_LEN + payload_len > incl_len) {
+                            payload_len = incl_len - FIXED_HDRS_LEN;
+                        }
+                        const uint8_t* payload = data + offset + FIXED_HDRS_LEN;
+                        parse_mold_payload(payload, payload_len, stats, default_book, expected_seq);
+                        offset += incl_len;
+                        continue;
+                    }
+                }
+            }
+
             auto eth = reinterpret_cast<const EthernetHeader*>(data + offset);
             pkt_offset += sizeof(EthernetHeader);
 
