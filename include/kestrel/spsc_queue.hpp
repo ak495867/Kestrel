@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <atomic>
 #include <vector>
+#include <cstring>
 #include <new>
 
 namespace kestrel {
@@ -70,9 +71,16 @@ public:
         }
 
         size_t to_write = (count < available) ? count : available;
-        for (size_t i = 0; i < to_write; ++i) {
-            buffer_[(current_tail + i) & MASK] = items[i];
+        size_t tail_idx = current_tail & MASK;
+        size_t first_chunk = Capacity - tail_idx;
+
+        if (to_write <= first_chunk) {
+            std::memcpy(buffer_ + tail_idx, items, to_write * sizeof(T));
+        } else {
+            std::memcpy(buffer_ + tail_idx, items, first_chunk * sizeof(T));
+            std::memcpy(buffer_, items + first_chunk, (to_write - first_chunk) * sizeof(T));
         }
+
         tail_.store(current_tail + to_write, std::memory_order_release);
         return to_write;
     }
@@ -87,9 +95,16 @@ public:
         }
 
         size_t to_read = (max_count < available) ? max_count : available;
-        for (size_t i = 0; i < to_read; ++i) {
-            items[i] = buffer_[(current_head + i) & MASK];
+        size_t head_idx = current_head & MASK;
+        size_t first_chunk = Capacity - head_idx;
+
+        if (to_read <= first_chunk) {
+            std::memcpy(items, buffer_ + head_idx, to_read * sizeof(T));
+        } else {
+            std::memcpy(items, buffer_ + head_idx, first_chunk * sizeof(T));
+            std::memcpy(items + first_chunk, buffer_, (to_read - first_chunk) * sizeof(T));
         }
+
         head_.store(current_head + to_read, std::memory_order_release);
         return to_read;
     }
