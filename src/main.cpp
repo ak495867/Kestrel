@@ -148,8 +148,9 @@ int main(int argc, char* argv[]) {
         double min_elapsed = 1e9;
         double max_throughput = 0.0;
 
+        kestrel::OrderBook run_book;
         for (int run = 0; run < 5; ++run) {
-            kestrel::OrderBook run_book;
+            run_book.reset();
             auto start = std::chrono::high_resolution_clock::now();
             stats = parser.parse(mmap_file.data(), mmap_file.size(), &run_book);
             auto end = std::chrono::high_resolution_clock::now();

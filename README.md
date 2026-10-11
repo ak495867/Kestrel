@@ -22,7 +22,7 @@ Tested on genuine NASDAQ TotalView-ITCH 5.0 market data (multiplexed multi-ticke
 
 | Benchmark Mode | Throughput | Latency / Msg | Workload & Test Harness |
 | :--- | :--- | :--- | :--- |
-| **Mode 1A: Parser-Only Wire Streaming** | **104.82 M msg/sec** | **~9.54 ns** | Real MoldUDP64/Ethernet capture, zero-copy stripping + byte-swapping |
+| **Mode 1A: Parser-Only Wire Streaming** | **105.45 M msg/sec** | **~9.48 ns** | Real MoldUDP64/Ethernet capture, zero-copy stripping + byte-swapping |
 | **Mode 1B: Single-Thread End-to-End** | **53.68 M msg/sec** | **~18.63 ns** | Real exchange stream reconstructed into SoA Order Book + Bitmapped BBO |
 | **Mode 2: Two-Thread SPSC Pipeline** | **38.70 M msg/sec** | **~25.84 ns** | Producer/Consumer cross-core queue dispatching real Add Orders + online VWAP |
 
@@ -31,8 +31,8 @@ Tested on genuine NASDAQ TotalView-ITCH 5.0 market data (multiplexed multi-ticke
 [+] Successfully mapped 94813890 bytes.
 
 === [MODE 1A] PARSER-ONLY WIRE STREAMING (NO BOOK ALLOCATION) ===
-[+] Parser-Only Peak Throughput:     104.824 M msg/sec
-[+] Parser-Only Latency:             9.53977 ns/msg
+[+] Parser-Only Peak Throughput:     105.452 M msg/sec
+[+] Parser-Only Latency:             9.48300 ns/msg
 
 === [MODE 1B] END-TO-END SINGLE-THREADED RECONSTRUCTION (PARSER + LOB) ===
 [+] Single-Threaded Best Time:       0.0165038 s

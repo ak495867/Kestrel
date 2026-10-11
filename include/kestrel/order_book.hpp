@@ -20,6 +20,19 @@ public:
     static constexpr uint64_t DELETED_KEY = 0xFFFFFFFFFFFFFFFFULL;
     static constexpr size_t NUM_BUCKETS = 16384;
 
+    void reset() noexcept {
+        active_orders_ = 0;
+        best_bid_tick_ = 0;
+        best_ask_tick_ = 0xFFFFFFFF;
+        std::memset(keys_.get(), 0, MAP_CAPACITY * sizeof(uint64_t));
+        std::memset(shares_.get(), 0, MAP_CAPACITY * sizeof(uint32_t));
+        std::memset(prices_.get(), 0, MAP_CAPACITY * sizeof(uint32_t));
+        std::memset(bid_levels_.get(), 0, 500000 * sizeof(uint64_t));
+        std::memset(ask_levels_.get(), 0, 500000 * sizeof(uint64_t));
+        std::memset(bid_bitmap_.get(), 0, NUM_BUCKETS * sizeof(uint64_t));
+        std::memset(ask_bitmap_.get(), 0, NUM_BUCKETS * sizeof(uint64_t));
+    }
+
     OrderBook() {
         keys_ = std::make_unique<uint64_t[]>(MAP_CAPACITY);
         shares_ = std::make_unique<uint32_t[]>(MAP_CAPACITY);
@@ -28,14 +41,7 @@ public:
         ask_levels_ = std::make_unique<uint64_t[]>(500000);
         bid_bitmap_ = std::make_unique<uint64_t[]>(NUM_BUCKETS);
         ask_bitmap_ = std::make_unique<uint64_t[]>(NUM_BUCKETS);
-
-        std::memset(keys_.get(), 0, MAP_CAPACITY * sizeof(uint64_t));
-        std::memset(shares_.get(), 0, MAP_CAPACITY * sizeof(uint32_t));
-        std::memset(prices_.get(), 0, MAP_CAPACITY * sizeof(uint32_t));
-        std::memset(bid_levels_.get(), 0, 500000 * sizeof(uint64_t));
-        std::memset(ask_levels_.get(), 0, 500000 * sizeof(uint64_t));
-        std::memset(bid_bitmap_.get(), 0, NUM_BUCKETS * sizeof(uint64_t));
-        std::memset(ask_bitmap_.get(), 0, NUM_BUCKETS * sizeof(uint64_t));
+        reset();
     }
 
     inline void add_order(uint64_t order_id, char side, uint32_t shares, uint32_t price) noexcept {
