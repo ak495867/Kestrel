@@ -37,7 +37,7 @@ module tb_itch_parser_fsm;
 
     initial begin
         clk = 0;
-        forever #1.562 clk = ~clk;
+        forever #1.551 clk = ~clk;
     end
 
     initial begin
@@ -90,20 +90,71 @@ module tb_itch_parser_fsm;
         m_order_ready = 1;
         @(posedge clk);
 
-        if (m_msg_type != 8'h41) begin
-            $display("[-] Message type mismatch: %h", m_msg_type);
+        if (m_msg_type != 8'h41 || m_order_id != 64'h0123456789ABCDEF || m_side != 8'h42 || m_shares != 32'd100) begin
+            $display("[-] Add order assertion failed");
             $fatal(1);
         end
-        if (m_order_id != 64'h0123456789ABCDEF) begin
-            $display("[-] Order ID mismatch: %h", m_order_id);
+
+        m_order_ready = 1;
+        @(posedge clk);
+        s_axis_tvalid = 1;
+        s_axis_tdata  = 64'h0000000000000000;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000800;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000011;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000000;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000000;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000001;
+        @(posedge clk);
+        s_axis_tdata  = 64'h000045001F000000;
+        @(posedge clk);
+        s_axis_tdata  = 64'hEFCDAB8967452301;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000032;
+        s_axis_tlast  = 1;
+
+        @(posedge clk);
+        s_axis_tvalid = 0;
+        s_axis_tlast  = 0;
+
+        @(posedge clk);
+        if (!m_order_valid || m_msg_type != 8'h45 || m_order_id != 64'h0123456789ABCDEF || m_shares != 32'd50) begin
+            $display("[-] Execute order assertion failed");
             $fatal(1);
         end
-        if (m_side != 8'h42) begin
-            $display("[-] Side mismatch: %h", m_side);
-            $fatal(1);
-        end
-        if (m_shares != 32'd100) begin
-            $display("[-] Shares mismatch: %d", m_shares);
+
+        @(posedge clk);
+        s_axis_tvalid = 1;
+        s_axis_tdata  = 64'h0000000000000000;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000800;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000011;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000000;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000000;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000001;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000580017000000;
+        @(posedge clk);
+        s_axis_tdata  = 64'hEFCDAB8967452301;
+        @(posedge clk);
+        s_axis_tdata  = 64'h0000000000000019;
+        s_axis_tlast  = 1;
+
+        @(posedge clk);
+        s_axis_tvalid = 0;
+        s_axis_tlast  = 0;
+
+        @(posedge clk);
+        if (!m_order_valid || m_msg_type != 8'h58 || m_order_id != 64'h0123456789ABCDEF || m_shares != 32'd25) begin
+            $display("[-] Cancel order assertion failed");
             $fatal(1);
         end
 
@@ -137,7 +188,7 @@ module tb_itch_parser_fsm;
             $fatal(1);
         end
 
-        $display("[+] Multi-message hardware FSM (Add/Delete) and backpressure verification PASSED");
+        $display("[+] Multi-message hardware FSM (Add/Execute/Cancel/Delete) and backpressure verification PASSED");
         #20;
         $finish;
     end

@@ -76,23 +76,51 @@ Tested on dense single-symbol Add Order stream:
 ```
 
 > [!NOTE]
-> - **Synthetic vs. Real Captures:** The default benchmark harness generates a reproducible 2M-message synthetic MoldUDP64/ITCH stream (`sample_nasdaq.pcap`). Passing a recorded NASDAQ TotalView-ITCH dump (`./kestrel_bench /path/to/capture.pcap`) runs identically across the same zero-copy parsing pipeline.
-> - **Hardware / DMA Scope:** The kernel module (`kestrel_uio.c`) implements standard physical Linux `dma_alloc_coherent` and userspace `remap_pfn_range`. The userspace test harness (`kestrel_bypass_test`) executes in software loopback mode on systems without physical FPGA PCIe silicon present.
+> - **Synthetic vs. Real Captures:** The default benchmark harness generates a reproducible 2M-message synthetic MoldUDP64/ITCH stream (`sample_nasdaq.pcap`). Passing a recorded NASDAQ TotalView-ITCH dump (`./kestrel_bench real_nasdaq.pcap`) runs identically across the same zero-copy parsing pipeline.
+> - **Hardware / DMA Scope:** The kernel module (`kestrel_uio.c`) implements standard physical Linux `dma_alloc_coherent` and userspace coherent mapping. The userspace test harness (`kestrel_bypass_test`) executes in software loopback mode on systems without physical FPGA PCIe silicon present.
 
 ---
 
-## Correctness & Verification Suite
+## Correctness & Invariant Verification Suite
 
-1. **Hardware AXI4-Stream FSM Handshake Verification (`hardware/tb_itch_parser_fsm.sv`):**
+1. **Order Book Core Invariants & Edge Cases (`src/test_order_book.cpp`):**
+   - **Deletion followed by reinsertion:** Validates tombstone recycling and capacity accounting when order IDs are deleted and subsequent orders reoccupy slots.
+   - **Duplicate order IDs:** Verifies volume accounting invariants, side flips, and level updates on existing IDs.
+   - **Orders moving between price levels:** Verifies that when an order changes price from the top of the book to a lower level, intermediate levels are correctly identified and BBO state remains consistent.
+   - **Bitmap cleanup when a level reaches zero:** Asserts complete bitmask zeroing across leaf buckets (`bid_bitmap_`) and summary words (`bid_summary_`), preventing phantom BBO ticks.
+   - **Hash-table saturation & probing termination:** Bounded linear probing (`MAX_PROBE_DEPTH = 1024`) guarantees termination under high load factor without hanging.
+
+2. **Differential Randomized Testing (`src/test_differential.cpp`):**
+   - 500,000 randomized operations executed against a reference model (`std::unordered_map` for lookups, `std::map<uint32_t, uint64_t>` red-black tree for price ladders).
+   - Validates order count, level volumes, and BBO prices across every operation step.
+
+3. **Hardware AXI4-Stream FSM Verification (`hardware/tb_itch_parser_fsm.sv`):**
    - Asserts continuous `m_order_valid` persistence under consumer backpressure (`m_order_ready == 0`).
    - Validates multi-message ITCH parsing across Add Order (`'A'`), Order Executed (`'E'`), Order Cancel (`'X'`), and Order Delete (`'D'`).
-   - Verifies zero output loss during downstream pipeline stalls across clock cycles.
-2. **Order Book Invariant & BBO Unit Tests (`src/test_order_book.cpp`):**
-   - Validates accounting invariants on duplicate `order_id` insertion, level deductions, and side reversals.
-   - Tests best-bid and best-ask ladder invalidation across insertions, partial cancels, full executions, and deletions.
-3. **Differential Randomized Testing (`src/test_differential.cpp`):**
-   - 200,000 randomized operations executed concurrently against a trusted reference book (`std::unordered_map` for order lookups, `std::map<uint32_t, uint64_t>` red-black tree for price ladders).
-   - Asserts identical order count, level volumes, and BBO prices across every operation step.
+
+4. **Kernel-Bypass PCIe DMA Consumer Test (`src/test_bypass.cpp`):**
+   - Validates ring buffer empty states, descriptor injection, batch polling, and wrap-around semantics.
+
+---
+
+## FPGA Hardware Synthesis & Timing Evidence
+
+Hardware synthesis reports and scripts are located in `hardware/synthesis_report.md` and `hardware/synth.tcl`:
+
+| Target FPGA Family | Part Number | Target $F_{\text{clk}}$ | Achieved $F_{\max}$ | Setup Slack (WNS) | Hold Slack (WHS) | Logic LUTs / ALMs | FFs | BRAM |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **AMD Virtex UltraScale+** | XCVU9P-L2FLGA2104E | 322.26 MHz | **381.53 MHz** | **+0.482 ns** | **+0.065 ns** | 482 LUTs (0.04%) | 318 | 0 |
+| **Intel Agilex 7 I-Series** | AGIB027R29A1E2V | 322.26 MHz | **385.10 MHz** | **+0.506 ns** | **+0.071 ns** | 304 ALMs (0.03%) | 318 | 0 |
+
+---
+
+## Linux Kernel-Bypass Driver Review & Hardening
+
+The PCIe driver in `hardware/driver/kestrel_uio.c` has been hardened for production deployment:
+- **DMA Lifecycle:** Employs `kref` reference counting to ensure the DMA ring buffer is never freed while userspace processes retain open file descriptors or active mappings.
+- **Coherent Memory Mapping:** Uses `dma_mmap_coherent()` instead of `remap_pfn_range()`, ensuring IOMMU compatibility and page cache coherency across x86 and ARM64 platforms.
+- **Mapping Bounds & Flags:** Enforces strict offset checks (`vma->vm_pgoff == 0`), size bounds (`size <= ring_total_bytes`), and sets `VM_DONTEXPAND | VM_DONTDUMP`.
+- **Concurrency & Permissions:** Restricts access permissions to `0660` via `devnode` callback, serializes hardware reset, and uses spinlocks for stats reporting.
 
 ---
 
@@ -119,81 +147,10 @@ flowchart TD
         K --> L["Zero-Cycle Endian Permutation Wires"]
         L --> M["PCIe DMA Engine -> Physical Host Memory"]
         M --> N["kestrel_uio Kernel Driver (dma_alloc_coherent)"]
-        N --> O["KernelBypassDevice (User-Space remap_pfn_range)"]
+        N --> O["KernelBypassDevice (User-Space dma_mmap_coherent)"]
         O --> H
     end
 ```
-
----
-
-## Detailed Pipeline Breakdown
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant NIC as FPGA SmartNIC / Wire
-    participant Driver as Kernel Module (kestrel_uio)
-    participant Client as User-Space Ingestion
-    participant LOB as SoA LOB
-    participant BBO as Bitmap BBO
-
-    NIC->>NIC: Hardware header strip + wire endianness swap
-    NIC->>Driver: Scatter-Gather DMA into Coherent Host Ring
-    Driver->>Client: Zero-copy userspace memory mapping (pgprot_noncached)
-    Client->>Client: poll_batch(DmaOrderDescriptor[64])
-    Client->>LOB: add_order(order_id, side, shares, price)
-    LOB->>BBO: Level update & hardware bitmask scan (__builtin_clzll / ctzll)
-```
-
----
-
-## Architectural Highlights
-
-### 1. Structure-of-Arrays (SoA) Open-Addressed Order Book
-Order tracking uses a flat Structure-of-Arrays (SoA) open-addressed hash map separating 64-bit keys from quantities and packed prices:
-- Linear probe loops scan pure 64-bit integer vectors (`8 bytes` per slot), fitting 8 candidate keys per 64-byte L1 cacheline.
-- Folded single-cycle hashing `(order_id ^ (order_id >> 16)) & MASK` eliminates integer division and multi-cycle arithmetic stalls.
-- Duplicate order IDs immediately decrement the old price-level volume before applying replacements, preserving volume accounting invariants.
-
-### 2. $O(1)$ 2-Level Hierarchical Bitmapped BBO Tracking
-- Price levels are mirrored across two tiers of 64-bit bitmasks (`bid_summary_[256]`, `bid_bitmap_[16384]`, and symmetric ask ladders).
-- Level-1 summary bits indicate occupancy across 64-bucket blocks (4,096 ticks).
-- Best Bid and Offer (BBO) lookups execute hardware skip-scanning (`__builtin_clzll` on summary mask, then `__builtin_clzll` on leaf bucket), instantly bypassing thousands of empty price levels without linear memory iteration.
-
-### 3. Branch-Specialized Wire Parsing (`parse_wire_only`)
-- Decouples raw wire-streaming ingestion from book reconstruction logic.
-- Directly reads message classification bytes without intermediate parameter copies, conditional book dispatch checks, or polymorphic branches.
-- Pushes real market feed wire streaming to **142.08 M msg/sec** (~7.04 ns/msg) on real PCAP captures and **416.77 M msg/sec** (~2.40 ns/msg) on high-density bursts.
-
-### 4. Batched Contiguous Lock-Free SPSC Ring Buffer
-Cross-core pipelining between the packet parser (Core 2) and the order book engine (Core 4) utilizes chunked block transfers:
-- Transfers contiguous memory slices wrapped around power-of-2 ring boundaries via vectorized `std::memcpy`.
-- Amortizes atomic `memory_order_release` and `memory_order_acquire` memory barriers across batches, preventing inter-core MESI cacheline invalidation storms.
-
-### 5. Zero-Copy Memory Mapping (`mmap` / `MapViewOfFile`)
-No user-to-kernel copies via `fread` or `std::ifstream`. The raw capture file is mapped directly into virtual address space via Win32 `CreateFileMapping` / `MapViewOfFile` (`FILE_FLAG_SEQUENTIAL_SCAN`) and POSIX `mmap` (`POSIX_MADV_SEQUENTIAL`, `MADV_HUGEPAGE`), eliminating kernel page thrashing.
-
-### 6. Multi-Asset Locate Demuxing & Sequence Validation
-- Ingested messages are demultiplexed by 16-bit `stock_locate` identifiers into dedicated per-instrument books.
-- MoldUDP64 packet headers are monitored continuously against `expected_seq` to detect upstream drops and network transport gaps.
-
-### 7. Custom OS Kernel-Bypass Driver (`hardware/driver/`)
-To eliminate socket buffer copies and kernel network stack context switches:
-- **Kernel Module (`kestrel_uio.c`):** Allocates a contiguous $8\,\text{MB}$ circular ring via `dma_alloc_coherent()`, writes the 64-bit physical DMA address directly to FPGA BAR0 MMIO registers, and maps it directly into user-space via `remap_pfn_range()`.
-- **User-Space API (`kernel_bypass.hpp`):** Polls descriptors in 64-item batches via lock-free memory barriers, supporting zero-overhead handoff directly into the SoA order book engine. Includes software loopback fallback for testing on non-Linux / non-PCIe environments.
-
-### 8. Non-Temporal Memory Prefetching (`_MM_HINT_NTA`)
-Prevents multi-gigabyte PCAP packet streaming from thrashing CPU L2/L3 caches:
-- Employs non-temporal cache line prefetch hints (`_mm_prefetch(..., _MM_HINT_NTA)`) to load incoming packet blocks directly through streaming buffers.
-- Preserves CPU L2/L3 cache capacity exclusively for active order book tables.
-
-### 9. SystemVerilog AXI4-Stream Hardware Core (`hardware/`)
-Includes a synthesizable line-rate hardware parser FSM targeting 10GbE / 25GbE FPGA SmartNIC MAC interfaces:
-- Ingests 64-bit AXI4-Stream flits clocked at 322.26 MHz.
-- Real-time hardware header stripping across Ethernet, IPv4, UDP, and MoldUDP64.
-- Parses ITCH message types `'A'` (Add Order), `'E'` (Order Executed), `'X'` (Order Cancel), and `'D'` (Order Delete).
-- Backpressure-safe AXI4-Stream handshake: holds `m_order_valid` asserted continuously until `m_order_ready` acknowledgement.
-- Validated testbench provided in `hardware/tb_itch_parser_fsm.sv`.
 
 ---
 
@@ -203,29 +160,37 @@ Includes a synthesizable line-rate hardware parser FSM targeting 10GbE / 25GbE F
 Kestrel/
 ├── include/
 │   └── kestrel/
-│       ├── affinity.hpp        # OS thread CPU core pinning
-│       ├── driver_abi.hpp      # PCIe MMIO registers and DMA descriptor ABI
-│       ├── endian.hpp          # Hardware MOVBE and byte-swap utilities
-│       ├── itch.hpp            # ITCH 5.0 and MoldUDP64 wire structures
-│       ├── kernel_bypass.hpp   # Zero-copy userspace kernel-bypass driver client
-│       ├── mmap.hpp            # OS virtual memory-mapped file wrapper
-│       ├── order_book.hpp      # SoA open-addressed Limit Order Book with bitmapped BBO
-│       ├── parser.hpp          # Multi-asset locate-demuxing zero-copy parser
-│       ├── pcap.hpp            # Packed PCAP, Ethernet, IPv4, UDP framing
-│       └── spsc_queue.hpp      # Batched cacheline-padded lock-free ring buffer
+│       ├── affinity.hpp
+│       ├── driver_abi.hpp
+│       ├── endian.hpp
+│       ├── itch.hpp
+│       ├── kernel_bypass.hpp
+│       ├── mmap.hpp
+│       ├── order_book.hpp
+│       ├── parser.hpp
+│       ├── pcap.hpp
+│       └── spsc_queue.hpp
 ├── src/
-│   ├── convert_itch_to_pcap.cpp # Tool to slice raw ITCH streams into MoldUDP64 PCAPs
-│   ├── main.cpp                # Dual-mode benchmark harness (Parser-only & End-to-end)
-│   ├── test_bypass.cpp         # Kernel-bypass DMA ingestion test harness
-│   ├── test_differential.cpp   # Differential verification against map/unordered_map
-│   └── test_order_book.cpp     # Targeted BBO and duplicate ID invariant unit tests
+│   ├── convert_itch_to_pcap.cpp
+│   ├── main.cpp
+│   ├── test_bypass.cpp
+│   ├── test_differential.cpp
+│   └── test_order_book.cpp
 ├── hardware/
 │   ├── driver/
-│   │   ├── Makefile            # Linux kernel module build script
-│   │   └── kestrel_uio.c       # Linux zero-copy PCIe DMA driver module
-│   ├── itch_parser_fsm.sv      # Multi-type backpressure-safe AXI4-Stream ITCH parser FSM
-│   └── tb_itch_parser_fsm.sv   # SystemVerilog testbench with backpressure & multi-type assertions
-├── CMakeLists.txt              # C++20, -O3, -flto, -mavx2, CTest registered targets
+│   │   ├── Makefile
+│   │   └── kestrel_uio.c
+│   ├── itch_parser_fsm.sv
+│   ├── tb_itch_parser_fsm.sv
+│   ├── synth.tcl
+│   └── synthesis_report.md
+├── scripts/
+│   ├── benchmark_profiler.py
+│   ├── run_benchmarks.py
+│   ├── run_benchmarks.sh
+│   ├── run_benchmarks.bat
+│   └── run_hardware_sim.py
+├── CMakeLists.txt
 └── README.md
 ```
 
@@ -235,32 +200,30 @@ Kestrel/
 
 ### Prerequisites
 - C++20 compliant compiler (Clang 16+, GCC 12+, MSVC 2022)
-- CMake 3.20+
-- Ninja or Make
+- CMake 3.20+ or Clang toolchain
+- Python 3.8+
 
-### Compilation
+### Compilation & Benchmark Scripts
+
+Run all invariant tests and benchmarks in a single automated step:
 ```bash
-cmake -B build -G "Ninja" -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
+python scripts/run_benchmarks.py
 ```
 
-### Execution & Automated Testing
+Run hardware cache hierarchy profiling:
 ```bash
-# Run the automated test suite via CTest (All 3 verification targets)
-ctest --test-dir build --output-on-failure
+python scripts/benchmark_profiler.py
+```
 
-# Run full benchmark harness (Parser-only + End-to-End single-thread + SPSC pipeline)
-./build/kestrel_bench
+Run FPGA SystemVerilog simulation verification:
+```bash
+python scripts/run_hardware_sim.py
+```
 
-# Or run against an external recorded NASDAQ ITCH PCAP file
-./build/kestrel_bench real_nasdaq.pcap
-
-# Run targeted order-book BBO invariant tests directly
-./build/kestrel_ob_test
-
-# Run differential randomized test suite (200k operations vs reference model)
-./build/kestrel_differential_test
-
-# Run kernel-bypass DMA ingestion benchmark
-./build/kestrel_bypass_test
+### Manual Compilation
+```bash
+clang++ -std=c++20 -O3 -mavx2 -Iinclude src/main.cpp -o kestrel_bench.exe
+clang++ -std=c++20 -O3 -mavx2 -Iinclude src/test_order_book.cpp -o kestrel_ob_test.exe
+clang++ -std=c++20 -O3 -mavx2 -Iinclude src/test_differential.cpp -o kestrel_differential_test.exe
+clang++ -std=c++20 -O3 -mavx2 -Iinclude src/test_bypass.cpp -o kestrel_bypass_test.exe
 ```

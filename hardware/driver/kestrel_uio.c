@@ -8,6 +8,9 @@
 #include <linux/dma-mapping.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
+#include <linux/version.h>
+#include <linux/kref.h>
+#include <linux/atomic.h>
 
 #define DRIVER_NAME "kestrel_uio"
 #define CLASS_NAME  "kestrel"
@@ -70,50 +73,111 @@ struct kestrel_device {
 
     struct kestrel_driver_stats stats;
     spinlock_t lock;
+    struct kref ref;
+    atomic_t open_count;
+    bool removed;
 };
 
 static struct kestrel_device *g_kdev = NULL;
+static DEFINE_MUTEX(kestrel_dev_mutex);
+
+static void kestrel_device_destroy(struct kref *ref) {
+    struct kestrel_device *kdev = container_of(ref, struct kestrel_device, ref);
+
+    if (kdev->ring_cpu_addr) {
+        dma_free_coherent(&kdev->pdev->dev, kdev->ring_total_bytes, kdev->ring_cpu_addr, kdev->ring_dma_handle);
+        kdev->ring_cpu_addr = NULL;
+    }
+
+    if (kdev->bar0_addr) {
+        pci_iounmap(kdev->pdev, kdev->bar0_addr);
+        kdev->bar0_addr = NULL;
+    }
+
+    pci_release_regions(kdev->pdev);
+    pci_disable_device(kdev->pdev);
+    kfree(kdev);
+}
 
 static int kestrel_open(struct inode *inodep, struct file *filep) {
-    filep->private_data = g_kdev;
-    return 0;
+    struct kestrel_device *kdev;
+    int ret = 0;
+
+    mutex_lock(&kestrel_dev_mutex);
+    kdev = g_kdev;
+    if (!kdev || kdev->removed) {
+        mutex_unlock(&kestrel_dev_mutex);
+        return -ENODEV;
+    }
+
+    if (atomic_inc_return(&kdev->open_count) > 1) {
+        atomic_dec(&kdev->open_count);
+        mutex_unlock(&kestrel_dev_mutex);
+        return -EBUSY;
+    }
+
+    kref_get(&kdev->ref);
+    filep->private_data = kdev;
+    mutex_unlock(&kestrel_dev_mutex);
+    return ret;
 }
 
 static int kestrel_release(struct inode *inodep, struct file *filep) {
+    struct kestrel_device *kdev = filep->private_data;
+
+    if (!kdev) return -ENODEV;
+
+    mutex_lock(&kestrel_dev_mutex);
+    atomic_dec(&kdev->open_count);
+    kref_put(&kdev->ref, kestrel_device_destroy);
+    mutex_unlock(&kestrel_dev_mutex);
     return 0;
 }
 
 static int kestrel_mmap(struct file *filep, struct vm_area_struct *vma) {
     struct kestrel_device *kdev = filep->private_data;
-    unsigned long pfn;
+    size_t size;
     int ret;
 
-    if (!kdev || !kdev->ring_cpu_addr) return -EINVAL;
+    if (!kdev || kdev->removed || !kdev->ring_cpu_addr) return -ENODEV;
+    if (vma->vm_pgoff != 0) return -EINVAL;
 
-    vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
-    pfn = dma_to_phys(&kdev->pdev->dev, kdev->ring_dma_handle) >> PAGE_SHIFT;
+    size = vma->vm_end - vma->vm_start;
+    if (size > kdev->ring_total_bytes) return -EINVAL;
 
-    ret = remap_pfn_range(vma, vma->vm_start, pfn, vma->vm_end - vma->vm_start, vma->vm_page_prot);
-    if (ret) return -EAGAIN;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+    vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
+#else
+    vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
+#endif
+
+    ret = dma_mmap_coherent(&kdev->pdev->dev, vma, kdev->ring_cpu_addr, kdev->ring_dma_handle, kdev->ring_total_bytes);
+    if (ret) return ret;
 
     return 0;
 }
 
 static long kestrel_ioctl(struct file *filep, unsigned int cmd, unsigned long arg) {
     struct kestrel_device *kdev = filep->private_data;
-    if (!kdev) return -ENODEV;
+    unsigned long flags;
+
+    if (!kdev || kdev->removed) return -ENODEV;
 
     switch (cmd) {
         case KESTREL_IOCTL_GET_STATS: {
-            if (copy_to_user((void __user *)arg, &kdev->stats, sizeof(kdev->stats))) {
+            struct kestrel_driver_stats s;
+            spin_lock_irqsave(&kdev->lock, flags);
+            memcpy(&s, &kdev->stats, sizeof(s));
+            spin_unlock_irqrestore(&kdev->lock, flags);
+            if (copy_to_user((void __user *)arg, &s, sizeof(s))) {
                 return -EFAULT;
             }
             break;
         }
         case KESTREL_IOCTL_RESET_STATS: {
-            spin_lock(&kdev->lock);
+            spin_lock_irqsave(&kdev->lock, flags);
             memset(&kdev->stats, 0, sizeof(kdev->stats));
-            spin_unlock(&kdev->lock);
+            spin_unlock_irqrestore(&kdev->lock, flags);
             break;
         }
         default:
@@ -130,6 +194,11 @@ static const struct file_operations fops = {
     .unlocked_ioctl = kestrel_ioctl,
 };
 
+static char *kestrel_devnode(const struct device *dev, umode_t *mode) {
+    if (mode) *mode = 0660;
+    return NULL;
+}
+
 static int kestrel_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id) {
     int ret;
     struct kestrel_device *kdev;
@@ -139,8 +208,10 @@ static int kestrel_pci_probe(struct pci_dev *pdev, const struct pci_device_id *i
 
     kdev->pdev = pdev;
     spin_lock_init(&kdev->lock);
+    kref_init(&kdev->ref);
+    atomic_set(&kdev->open_count, 0);
+    kdev->removed = false;
     pci_set_drvdata(pdev, kdev);
-    g_kdev = kdev;
 
     ret = pci_enable_device(pdev);
     if (ret) goto err_free_kdev;
@@ -182,17 +253,26 @@ static int kestrel_pci_probe(struct pci_dev *pdev, const struct pci_device_id *i
     ret = cdev_add(&kdev->cdev, kdev->dev_num, 1);
     if (ret < 0) goto err_unregister_chrdev;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
     kdev->dev_class = class_create(CLASS_NAME);
+#else
+    kdev->dev_class = class_create(THIS_MODULE, CLASS_NAME);
+#endif
     if (IS_ERR(kdev->dev_class)) {
         ret = PTR_ERR(kdev->dev_class);
         goto err_cdev_del;
     }
+    kdev->dev_class->devnode = kestrel_devnode;
 
     kdev->device = device_create(kdev->dev_class, NULL, kdev->dev_num, NULL, DRIVER_NAME);
     if (IS_ERR(kdev->device)) {
         ret = PTR_ERR(kdev->device);
         goto err_class_destroy;
     }
+
+    mutex_lock(&kestrel_dev_mutex);
+    g_kdev = kdev;
+    mutex_unlock(&kestrel_dev_mutex);
 
     return 0;
 
@@ -212,7 +292,6 @@ err_disable_pci:
     pci_disable_device(pdev);
 err_free_kdev:
     kfree(kdev);
-    g_kdev = NULL;
     return ret;
 }
 
@@ -220,25 +299,24 @@ static void kestrel_pci_remove(struct pci_dev *pdev) {
     struct kestrel_device *kdev = pci_get_drvdata(pdev);
     if (!kdev) return;
 
-    iowrite32(0, kdev->bar0_addr + KESTREL_REG_CTRL);
+    mutex_lock(&kestrel_dev_mutex);
+    kdev->removed = true;
+    if (g_kdev == kdev) {
+        g_kdev = NULL;
+    }
+    mutex_unlock(&kestrel_dev_mutex);
+
+    if (kdev->bar0_addr) {
+        iowrite32(0, kdev->bar0_addr + KESTREL_REG_CTRL);
+        mmiowb();
+    }
 
     device_destroy(kdev->dev_class, kdev->dev_num);
     class_destroy(kdev->dev_class);
     cdev_del(&kdev->cdev);
     unregister_chrdev_region(kdev->dev_num, 1);
 
-    if (kdev->ring_cpu_addr) {
-        dma_free_coherent(&pdev->dev, kdev->ring_total_bytes, kdev->ring_cpu_addr, kdev->ring_dma_handle);
-    }
-
-    if (kdev->bar0_addr) {
-        pci_iounmap(pdev, kdev->bar0_addr);
-    }
-
-    pci_release_regions(pdev);
-    pci_disable_device(pdev);
-    kfree(kdev);
-    g_kdev = NULL;
+    kref_put(&kdev->ref, kestrel_device_destroy);
 }
 
 static const struct pci_device_id kestrel_pci_ids[] = {
@@ -268,4 +346,4 @@ module_exit(kestrel_driver_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Kestrel Quant Systems");
 MODULE_DESCRIPTION("Zero-Copy Kernel-Bypass PCIe DMA Order Book Ingestion Driver");
-MODULE_VERSION("1.0.0");
+MODULE_VERSION("1.1.0");

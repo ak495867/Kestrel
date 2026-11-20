@@ -6,8 +6,39 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <cassert>
+
+static void test_ring_invariants() {
+    kestrel::KernelBypassDevice dev;
+    kestrel::DmaOrderDescriptor batch[128];
+
+    size_t initial_poll = dev.poll_batch(batch, 128);
+    assert(initial_poll == 0);
+
+    kestrel::DmaOrderDescriptor sample{};
+    sample.order_id = 999;
+    sample.shares = 100;
+    sample.price = 15000;
+    sample.side = 'B';
+    sample.msg_type = 'A';
+
+    bool injected = dev.mock_inject(sample);
+    assert(injected);
+
+    size_t polled = dev.poll_batch(batch, 128);
+    assert(polled == 1);
+    assert(batch[0].order_id == 999);
+    assert(batch[0].shares == 100);
+    assert(batch[0].price == 15000);
+    assert(batch[0].side == 'B');
+
+    size_t empty_again = dev.poll_batch(batch, 128);
+    assert(empty_again == 0);
+}
 
 int main() {
+    test_ring_invariants();
+
     kestrel::KernelBypassDevice dev;
     kestrel::OrderBook book;
 

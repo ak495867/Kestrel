@@ -8,6 +8,7 @@
 #include <string>
 #include <algorithm>
 #include <cstring>
+#include <cstddef>
 #include <immintrin.h>
 
 namespace kestrel {
@@ -16,6 +17,7 @@ class OrderBook {
 public:
     static constexpr size_t MAP_CAPACITY = 4194304;
     static constexpr size_t MAP_MASK = MAP_CAPACITY - 1;
+    static constexpr size_t MAX_PROBE_DEPTH = 1024;
     static constexpr uint64_t EMPTY_KEY = 0;
     static constexpr uint64_t DELETED_KEY = 0xFFFFFFFFFFFFFFFFULL;
     static constexpr size_t NUM_BUCKETS = 16384;
@@ -54,6 +56,9 @@ public:
     }
 
     inline void add_order(uint64_t order_id, char side, uint32_t shares, uint32_t price) noexcept {
+        if (__builtin_expect(order_id == EMPTY_KEY || order_id == DELETED_KEY, 0)) return;
+        if (__builtin_expect(active_orders_ >= MAP_CAPACITY, 0)) return;
+
         size_t idx = hash_order_id(order_id);
         uint32_t packed_price = (price & 0x7FFFFFFF) | (static_cast<uint32_t>(side == 'B') << 31);
 
@@ -77,7 +82,9 @@ public:
         } else {
             size_t first_deleted = (k0 == DELETED_KEY) ? idx : MAP_CAPACITY;
             idx = (idx + 1) & MAP_MASK;
-            while (true) {
+            size_t probes = 1;
+            bool inserted = false;
+            while (probes < MAX_PROBE_DEPTH) {
                 uint64_t k = k_ptr[idx];
                 if (k == EMPTY_KEY) {
                     if (first_deleted != MAP_CAPACITY) idx = first_deleted;
@@ -85,6 +92,7 @@ public:
                     s_ptr[idx] = shares;
                     p_ptr[idx] = packed_price;
                     active_orders_++;
+                    inserted = true;
                     break;
                 } else if (k == DELETED_KEY) {
                     if (first_deleted == MAP_CAPACITY) first_deleted = idx;
@@ -95,9 +103,17 @@ public:
                     reduce_level(old_side, old_tick, s_ptr[idx]);
                     s_ptr[idx] = shares;
                     p_ptr[idx] = packed_price;
+                    inserted = true;
                     break;
                 }
                 idx = (idx + 1) & MAP_MASK;
+                probes++;
+            }
+            if (!inserted && first_deleted != MAP_CAPACITY) {
+                k_ptr[first_deleted] = order_id;
+                s_ptr[first_deleted] = shares;
+                p_ptr[first_deleted] = packed_price;
+                active_orders_++;
             }
         }
 
@@ -109,12 +125,20 @@ public:
                 bid_levels_[tick] += shares;
                 bid_bitmap_[b_idx] |= (1ULL << (tick & 63));
                 bid_summary_[s_idx] |= (1ULL << (b_idx & 63));
-                if (tick > best_bid_tick_ || best_bid_tick_ >= 500000) best_bid_tick_ = tick;
+                if (tick > best_bid_tick_ && best_bid_tick_ > 0) {
+                    best_bid_tick_ = tick;
+                } else if (best_bid_tick_ == 0 && active_orders_ == 1) {
+                    best_bid_tick_ = tick;
+                }
             } else {
                 ask_levels_[tick] += shares;
                 ask_bitmap_[b_idx] |= (1ULL << (tick & 63));
                 ask_summary_[s_idx] |= (1ULL << (b_idx & 63));
-                if (tick < best_ask_tick_) best_ask_tick_ = tick;
+                if (tick < best_ask_tick_ && best_ask_tick_ < 500000) {
+                    best_ask_tick_ = tick;
+                } else if (best_ask_tick_ == 0xFFFFFFFF && active_orders_ == 1) {
+                    best_ask_tick_ = tick;
+                }
             }
         }
     }
@@ -125,7 +149,8 @@ public:
         uint32_t* s_ptr = shares_.get();
         uint32_t* p_ptr = prices_.get();
 
-        while (true) {
+        size_t probes = 0;
+        while (probes++ < MAX_PROBE_DEPTH) {
             uint64_t k = k_ptr[idx];
             if (k == EMPTY_KEY) return;
             if (k == order_id) {
@@ -156,7 +181,8 @@ public:
         uint32_t* s_ptr = shares_.get();
         uint32_t* p_ptr = prices_.get();
 
-        while (true) {
+        size_t probes = 0;
+        while (probes++ < MAX_PROBE_DEPTH) {
             uint64_t k = k_ptr[idx];
             if (k == EMPTY_KEY) return;
             if (k == order_id) {
@@ -178,7 +204,8 @@ public:
         uint32_t* s_ptr = shares_.get();
         uint32_t* p_ptr = prices_.get();
 
-        while (true) {
+        size_t probes = 0;
+        while (probes++ < MAX_PROBE_DEPTH) {
             uint64_t k = k_ptr[idx];
             if (k == EMPTY_KEY) return;
             if (k == old_order_id) {
@@ -204,7 +231,7 @@ public:
 
     [[nodiscard]] uint32_t best_bid() noexcept {
         if (best_bid_tick_ > 0 && best_bid_tick_ < 500000 && bid_levels_[best_bid_tick_] > 0) return best_bid_tick_;
-        for (ssize_t s = static_cast<ssize_t>(NUM_SUMMARY - 1); s >= 0; --s) {
+        for (int64_t s = static_cast<int64_t>(NUM_SUMMARY) - 1; s >= 0; --s) {
             uint64_t s_mask = bid_summary_[s];
             while (s_mask != 0) {
                 int s_bit = 63 - __builtin_clzll(s_mask);

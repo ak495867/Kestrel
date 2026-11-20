@@ -112,7 +112,7 @@ int main() {
     std::uniform_int_distribution<int> op_dist(0, 9);
     std::uniform_int_distribution<int> side_dist(0, 1);
 
-    constexpr size_t NUM_OPS = 200000;
+    constexpr size_t NUM_OPS = 500000;
 
     for (size_t step = 0; step < NUM_OPS; ++step) {
         int op = op_dist(rng);
@@ -154,7 +154,7 @@ int main() {
     assert(fast_book.best_bid() == ref_book.best_bid());
     assert(fast_book.best_ask() == ref_book.best_ask());
 
-    std::cout << "[+] Differential Testing (200,000 Operations against Reference Model): PASSED.\n";
+    std::cout << "[+] Differential Testing (" << NUM_OPS << " Operations against Reference Model): PASSED.\n";
     std::cout << "[+] Final Order Count: " << fast_book.order_count() << "\n";
     std::cout << "[+] Final Best Bid:    " << fast_book.best_bid() << " (Ref: " << ref_book.best_bid() << ")\n";
     std::cout << "[+] Final Best Ask:    " << fast_book.best_ask() << " (Ref: " << ref_book.best_ask() << ")\n";
